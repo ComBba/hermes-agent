@@ -2721,9 +2721,9 @@ def _gateway_turn_exit_reason(agent_result: Dict[str, Any]) -> str:
 
     Normal agent results carry the finalizer's explicit reason. Early
     interrupts can bypass that finalizer, so classify their gateway control
-    marker instead of collapsing system aborts into user stops. An interrupted
-    turn with an unrecognized marker remains distinct from a genuinely missing
-    reason.
+    marker instead of collapsing system aborts into user stops. A non-control
+    message is user-originated correction text; only an interrupted turn with
+    no marker remains unclassified.
     """
     reason = _normalize_turn_exit_reason(agent_result.get("turn_exit_reason"))
     if reason and not _is_generic_agent_interrupt_exit_reason(reason):
@@ -2744,7 +2744,30 @@ def _gateway_turn_exit_reason(agent_result: Dict[str, Any]) -> str:
         return system_reason
     if normalized_message in _USER_INTERRUPT_MESSAGES:
         return "interrupted_by_user"
-    return reason or "gateway_interrupt_unclassified"
+    if reason:
+        return reason
+    if normalized_message and not _is_control_interrupt_message(
+        normalized_message
+    ):
+        return "interrupted_by_user"
+    return "gateway_interrupt_unclassified"
+
+
+def _gateway_agent_end_metadata(
+    agent_result: Dict[str, Any],
+    *,
+    stale: bool = False,
+) -> Dict[str, Any]:
+    """Return bounded, fail-safe ``agent:end`` termination metadata."""
+    try:
+        api_call_count = max(0, int(agent_result.get("api_calls") or 0))
+    except Exception:
+        api_call_count = 0
+    return {
+        "turn_exit_reason": _gateway_turn_exit_reason(agent_result)[:200],
+        "api_call_count": api_call_count,
+        "stale": stale,
+    }
 
 
 def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None]:
@@ -14527,6 +14550,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _quick_key or "?",
                     run_generation,
                 )
+                stale_agent_end_metadata = _gateway_agent_end_metadata(
+                    agent_result,
+                    stale=True,
+                )
+                stale_reason = stale_agent_end_metadata["turn_exit_reason"]
+                if (
+                    stale_reason == "unknown"
+                    or stale_reason.startswith("text_response")
+                ):
+                    stale_agent_end_metadata["turn_exit_reason"] = (
+                        "gateway_stale_generation"
+                    )
+                elif stale_reason == "gateway_proxy_response_complete":
+                    stale_agent_end_metadata["turn_exit_reason"] = (
+                        "gateway_proxy_stale_generation"
+                    )
                 _stale_adapter = self._adapter_for_source(source)
                 if getattr(type(_stale_adapter), "pop_post_delivery_callback", None) is not None:
                     _stale_adapter.pop_post_delivery_callback(
@@ -14535,6 +14574,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 elif _stale_adapter and hasattr(_stale_adapter, "_post_delivery_callbacks"):
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
+                await self.hooks.emit(
+                    "agent:end",
+                    {
+                        **hook_ctx,
+                        "response": "",
+                        **stale_agent_end_metadata,
+                    },
+                )
                 return None
 
             response = agent_result.get("final_response") or ""
@@ -14724,18 +14771,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Retry/error-backoff interrupts can bypass turn_finalizer. Preserve
             # explicit agent reasons, distinguish gateway system aborts from
             # user stops, and make every otherwise-missing class "unknown".
-            turn_exit_reason = _gateway_turn_exit_reason(agent_result)
-            try:
-                api_call_count = max(0, int(agent_result.get("api_calls") or 0))
-            except Exception:
-                api_call_count = 0
+            agent_end_metadata = _gateway_agent_end_metadata(agent_result)
 
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
                 "response": (response or "")[:500],
-                "turn_exit_reason": turn_exit_reason[:200],
-                "api_call_count": api_call_count,
+                **agent_end_metadata,
             })
             
             # Check for pending process watchers (check_interval on background processes)

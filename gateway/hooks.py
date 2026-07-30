@@ -32,15 +32,29 @@ Context dict passed to ``agent:start`` / ``agent:end`` handlers:
   response     -- agent response text (truncated to 500 chars)
   turn_exit_reason -- why the agent loop ended (truncated to 200 chars);
                       finalizer text is collapsed to a single line,
-                      early user stops normalize to "interrupted_by_user",
+                      explicit stop/reset controls and mid-turn user correction
+                      text without an explicit finalizer reason normalize to
+                      "interrupted_by_user",
                       gateway system aborts and unclassified interrupts remain
                       distinct, and other missing or malformed reasons
                       normalize to "unknown"
-  api_call_count -- non-negative API iterations consumed by the turn
+  api_call_count -- non-negative API iterations consumed by the turn; zero can
+                    also mean not reported because proxy mode reports zero and
+                    absent or malformed counts clamp to zero
+  stale        -- boolean; true when the run was superseded and its output was
+                  discarded, false when this is the current delivered turn
 
 ``turn_exit_reason`` is an open vocabulary: specific agent-finalizer reasons
-pass through, while gateway-owned classes use ``gateway_*`` and proxy classes
-use ``gateway_proxy_*`` prefixes.
+pass through. Gateway-owned classes include ``interrupted_by_user``,
+``unknown``, and the ``gateway_*`` / ``gateway_proxy_*`` families.
+
+A superseded run still emits ``agent:end`` with ``stale == True`` and an empty
+``response`` before its output is discarded. Non-proxy runs whose prior result
+was normal or missing a reason use ``gateway_stale_generation``; an otherwise
+complete proxy run uses ``gateway_proxy_stale_generation``. More specific
+abnormal reasons remain intact, so delivery-side handlers must gate on
+``stale`` rather than a reason string and must not post a follow-up when it is
+true.
 
 Handlers posting a follow-up into the same Telegram forum-topic should
 include ``message_thread_id=int(thread_id)`` when ``chat_type == "forum"``

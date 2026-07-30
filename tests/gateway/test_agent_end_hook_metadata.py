@@ -127,6 +127,7 @@ async def test_agent_end_hook_includes_termination_metadata(
     assert len(agent_end_contexts) == 1
     assert agent_end_contexts[0]["turn_exit_reason"] == turn_exit_reason
     assert agent_end_contexts[0]["api_call_count"] == api_calls
+    assert agent_end_contexts[0]["stale"] is False
     assert isinstance(agent_end_contexts[0]["turn_exit_reason"], str)
     assert isinstance(agent_end_contexts[0]["api_call_count"], int)
     assert agent_end_contexts[0]["session_id"] == "sess-agent-end"
@@ -184,7 +185,7 @@ async def test_agent_end_hook_normalizes_early_user_interrupt(monkeypatch, tmp_p
             "gateway_restart",
         ),
         (None, "gateway_interrupt_unclassified"),
-        ("future gateway interrupt", "gateway_interrupt_unclassified"),
+        ("new correction", "interrupted_by_user"),
     ],
 )
 async def test_agent_end_hook_classifies_early_interrupt_actor(
@@ -474,6 +475,159 @@ async def test_agent_end_hook_clamps_negative_count(monkeypatch, tmp_path):
         if call.args[0] == "agent:end"
     ][0]
     assert agent_end["api_call_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_proxy_result_emits_agent_end_before_discard(
+    monkeypatch,
+    tmp_path,
+):
+    events = []
+
+    class _StaleAdapter:
+        def pop_post_delivery_callback(self, _key, *, generation):
+            assert generation == 1
+            events.append("cleanup")
+
+        async def send(self, _chat_id, _content, *, metadata):
+            return SimpleNamespace(success=True)
+
+    runner = _runner(monkeypatch, tmp_path)
+    runner._is_session_run_current = lambda _key, _gen: False
+    stale_adapter = _StaleAdapter()
+    runner._adapter_for_source = lambda _source: stale_adapter
+
+    async def emit_after_cleanup(event_type, _context):
+        if event_type == "agent:end":
+            events.append("emit")
+
+    runner.hooks.emit.side_effect = emit_after_cleanup
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "",
+            "messages": [],
+            "tools": [],
+            "api_calls": 0,
+            "partial": False,
+            "turn_exit_reason": "gateway_proxy_stale_generation",
+        }
+    )
+
+    result = await runner._handle_message_with_agent(
+        _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
+    )
+
+    assert result is None
+    agent_end = [
+        call.args[1]
+        for call in runner.hooks.emit.await_args_list
+        if call.args[0] == "agent:end"
+    ]
+    assert len(agent_end) == 1
+    assert agent_end[0]["turn_exit_reason"] == "gateway_proxy_stale_generation"
+    assert agent_end[0]["api_call_count"] == 0
+    assert agent_end[0]["response"] == ""
+    assert agent_end[0]["stale"] is True
+    assert events == ["cleanup", "emit"]
+
+
+@pytest.mark.asyncio
+async def test_stale_non_proxy_result_pairs_agent_start_and_end(
+    monkeypatch,
+    tmp_path,
+):
+    runner = _runner(monkeypatch, tmp_path)
+    runner._is_session_run_current = lambda _key, _gen: False
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "discarded",
+            "messages": [],
+            "tools": [],
+            "api_calls": 1,
+            "partial": False,
+            "turn_exit_reason": "text_response(finish_reason=stop)",
+        }
+    )
+
+    result = await runner._handle_message_with_agent(
+        _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
+    )
+
+    assert result is None
+    lifecycle_events = [
+        (call.args[0], call.args[1])
+        for call in runner.hooks.emit.await_args_list
+        if call.args[0] in {"agent:start", "agent:end"}
+    ]
+    assert [event_type for event_type, _context in lifecycle_events] == [
+        "agent:start",
+        "agent:end",
+    ]
+    assert (
+        lifecycle_events[1][1]["turn_exit_reason"]
+        == "gateway_stale_generation"
+    )
+    assert lifecycle_events[1][1]["response"] == ""
+    assert lifecycle_events[1][1]["stale"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_result", "expected_reason"),
+    [
+        (
+            {
+                "final_response": "",
+                "messages": [],
+                "tools": [],
+                "api_calls": 0,
+            },
+            "gateway_stale_generation",
+        ),
+        (
+            {
+                "final_response": "proxy output",
+                "messages": [],
+                "tools": [],
+                "api_calls": 1,
+                "turn_exit_reason": "gateway_proxy_response_complete",
+            },
+            "gateway_proxy_stale_generation",
+        ),
+        (
+            {
+                "final_response": "",
+                "messages": [],
+                "tools": [],
+                "api_calls": 1,
+                "turn_exit_reason": "gateway_inactivity_timeout",
+            },
+            "gateway_inactivity_timeout",
+        ),
+    ],
+)
+async def test_stale_agent_end_preserves_provenance_and_abnormal_reason(
+    monkeypatch,
+    tmp_path,
+    agent_result,
+    expected_reason,
+):
+    runner = _runner(monkeypatch, tmp_path)
+    runner._is_session_run_current = lambda _key, _gen: False
+    runner._run_agent = AsyncMock(return_value=agent_result)
+
+    await runner._handle_message_with_agent(
+        _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
+    )
+
+    agent_end = [
+        call.args[1]
+        for call in runner.hooks.emit.await_args_list
+        if call.args[0] == "agent:end"
+    ][0]
+    assert agent_end["turn_exit_reason"] == expected_reason
+    assert agent_end["response"] == ""
+    assert agent_end["stale"] is True
 
 
 def _runtime_runner():
