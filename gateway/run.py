@@ -2653,25 +2653,98 @@ _INTERRUPT_REASON_TIMEOUT = "Execution timed out (inactivity)"
 _INTERRUPT_REASON_SSE_DISCONNECT = "SSE client disconnected"
 _INTERRUPT_REASON_GATEWAY_SHUTDOWN = "Gateway shutting down"
 _INTERRUPT_REASON_GATEWAY_RESTART = "Gateway restarting"
+_GATEWAY_AGENT_POLL_INTERVAL_SECONDS = 5.0
+
+def _normalize_interrupt_message(message: object) -> str:
+    """Normalize an interrupt marker without trusting its input type."""
+    try:
+        if not message:
+            return ""
+        return " ".join(str(message).strip().split()).lower()
+    except Exception:
+        return ""
+
 
 _CONTROL_INTERRUPT_MESSAGES = frozenset(
-    {
-        _INTERRUPT_REASON_STOP.lower(),
-        _INTERRUPT_REASON_RESET.lower(),
-        _INTERRUPT_REASON_TIMEOUT.lower(),
-        _INTERRUPT_REASON_SSE_DISCONNECT.lower(),
-        _INTERRUPT_REASON_GATEWAY_SHUTDOWN.lower(),
-        _INTERRUPT_REASON_GATEWAY_RESTART.lower(),
-    }
+    _normalize_interrupt_message(message)
+    for message in (
+        _INTERRUPT_REASON_STOP,
+        _INTERRUPT_REASON_RESET,
+        _INTERRUPT_REASON_TIMEOUT,
+        _INTERRUPT_REASON_SSE_DISCONNECT,
+        _INTERRUPT_REASON_GATEWAY_SHUTDOWN,
+        _INTERRUPT_REASON_GATEWAY_RESTART,
+    )
 )
 
 
 def _is_control_interrupt_message(message: Optional[str]) -> bool:
     """Return True when an interrupt message is internal control flow."""
-    if not message:
-        return False
-    normalized = " ".join(str(message).strip().split()).lower()
+    normalized = _normalize_interrupt_message(message)
     return normalized in _CONTROL_INTERRUPT_MESSAGES
+
+
+def _normalize_turn_exit_reason(reason: object) -> str:
+    """Collapse untrusted finalizer reason text to a single bounded-safe line."""
+    try:
+        if reason is None:
+            return ""
+        collapsed = " ".join(str(reason).strip().split())
+        return "".join(char for char in collapsed if char.isprintable())
+    except Exception:
+        return ""
+
+
+_SYSTEM_INTERRUPT_EXIT_REASONS = {
+    _normalize_interrupt_message(_INTERRUPT_REASON_TIMEOUT):
+        "gateway_inactivity_timeout",
+    _normalize_interrupt_message(_INTERRUPT_REASON_SSE_DISCONNECT):
+        "gateway_sse_disconnect",
+    _normalize_interrupt_message(_INTERRUPT_REASON_GATEWAY_SHUTDOWN):
+        "gateway_shutdown",
+    _normalize_interrupt_message(_INTERRUPT_REASON_GATEWAY_RESTART):
+        "gateway_restart",
+}
+_USER_INTERRUPT_MESSAGES = {
+    _normalize_interrupt_message(_INTERRUPT_REASON_STOP),
+    _normalize_interrupt_message(_INTERRUPT_REASON_RESET),
+}
+
+
+def _is_generic_agent_interrupt_exit_reason(reason: str) -> bool:
+    """Return True for agent-finalizer interruption classes and variants."""
+    return reason.casefold().startswith("interrupt")
+
+
+def _gateway_turn_exit_reason(agent_result: Dict[str, Any]) -> str:
+    """Return a stable reason for the ``agent:end`` hook.
+
+    Normal agent results carry the finalizer's explicit reason. Early
+    interrupts can bypass that finalizer, so classify their gateway control
+    marker instead of collapsing system aborts into user stops. An interrupted
+    turn with an unrecognized marker remains distinct from a genuinely missing
+    reason.
+    """
+    reason = _normalize_turn_exit_reason(agent_result.get("turn_exit_reason"))
+    if reason and not _is_generic_agent_interrupt_exit_reason(reason):
+        return reason
+
+    try:
+        interrupted = bool(agent_result.get("interrupted"))
+    except Exception:
+        interrupted = False
+    if not interrupted:
+        return reason or "unknown"
+
+    normalized_message = _normalize_interrupt_message(
+        agent_result.get("interrupt_message")
+    )
+    system_reason = _SYSTEM_INTERRUPT_EXIT_REASONS.get(normalized_message)
+    if system_reason:
+        return system_reason
+    if normalized_message in _USER_INTERRUPT_MESSAGES:
+        return "interrupted_by_user"
+    return reason or "gateway_interrupt_unclassified"
 
 
 def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None]:
@@ -14648,10 +14721,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
 
+            # Retry/error-backoff interrupts can bypass turn_finalizer. Preserve
+            # explicit agent reasons, distinguish gateway system aborts from
+            # user stops, and make every otherwise-missing class "unknown".
+            turn_exit_reason = _gateway_turn_exit_reason(agent_result)
+            try:
+                api_call_count = max(0, int(agent_result.get("api_calls") or 0))
+            except Exception:
+                api_call_count = 0
+
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
                 "response": (response or "")[:500],
+                "turn_exit_reason": turn_exit_reason[:200],
+                "api_call_count": api_call_count,
             })
             
             # Check for pending process watchers (check_interval on background processes)
@@ -20309,6 +20393,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [],
                 "api_calls": 0,
                 "tools": [],
+                "partial": False,
+                "turn_exit_reason": "gateway_proxy_dependency_missing",
             }
 
         proxy_url = self._get_proxy_url()
@@ -20318,6 +20404,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [],
                 "api_calls": 0,
                 "tools": [],
+                "partial": False,
+                "turn_exit_reason": "gateway_proxy_not_configured",
             }
 
         proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
@@ -20448,6 +20536,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Make the HTTP request with SSE streaming -----------------------
         full_response = ""
+        proxy_partial = False
         _start = time.time()
 
         try:
@@ -20469,6 +20558,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "messages": [],
                             "api_calls": 0,
                             "tools": [],
+                            "partial": False,
+                            "turn_exit_reason": "gateway_proxy_http_error",
                         }
 
                     # Parse SSE stream
@@ -20488,6 +20579,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "history_offset": len(history),
                                 "session_id": session_id,
                                 "response_previewed": False,
+                                "partial": False,
+                                "turn_exit_reason":
+                                    "gateway_proxy_stale_generation",
                             }
                         text = chunk.decode("utf-8", errors="replace")
                         buffer += text
@@ -20529,8 +20623,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],
+                    "partial": False,
+                    "turn_exit_reason": "gateway_proxy_connection_error",
                 }
             # Partial response — return what we got
+            proxy_partial = True
         finally:
             # Finalize stream consumer
             if _stream_consumer:
@@ -20556,6 +20653,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "history_offset": len(history),
                 "session_id": session_id,
                 "response_previewed": False,
+                "partial": False,
+                "turn_exit_reason": "gateway_proxy_stale_generation",
             }
         logger.info(
             "proxy response: url=%s session=%s time=%.1fs response=%d chars",
@@ -20573,6 +20672,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "history_offset": len(history),
             "session_id": session_id,
             "response_previewed": _stream_consumer is not None and bool(full_response),
+            # Preserve the proxy result's pre-REL-01 downstream control flow.
+            # The exit reason carries partial-stream evidence to the hook
+            # without activating unrelated ``result["partial"]`` consumers.
+            "partial": False,
+            "turn_exit_reason": (
+                "gateway_proxy_partial_response"
+                if proxy_partial
+                else (
+                    "gateway_proxy_response_complete"
+                    if full_response
+                    else "gateway_proxy_empty_response"
+                )
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -21927,6 +22039,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],
+                    "turn_exit_reason": "gateway_agent_runtime_resolution_failed",
                 }
 
             pr = self._provider_routing
@@ -23066,6 +23179,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "final_response": final_response,
                     "messages": result.get("messages", []),
                     "api_calls": result.get("api_calls", 0),
+                    "turn_exit_reason": result.get("turn_exit_reason"),
                     "failed": result.get("failed", False),
                     # Sibling of the non-empty-response return below (#64686):
                     # the classifier's failure_reason must survive the
@@ -23193,6 +23307,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "last_reasoning": result.get("last_reasoning"),
                 "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
                 "api_calls": result_holder[0].get("api_calls", 0) if result_holder[0] else 0,
+                "turn_exit_reason": (
+                    result_holder[0].get("turn_exit_reason")
+                    if result_holder[0] else None
+                ),
                 "failed": result_holder[0].get("failed", False) if result_holder[0] else False,
                 "failure_reason": (
                     result_holder[0].get("failure_reason") if result_holder[0] else None
@@ -23503,7 +23621,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
 
             _inactivity_timeout = False
-            _POLL_INTERVAL = 5.0
+            _POLL_INTERVAL = _GATEWAY_AGENT_POLL_INTERVAL_SECONDS
 
             if _agent_timeout is None:
                 # Unlimited — still poll periodically for backup interrupt
@@ -23691,6 +23809,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "tools": tools_holder[0] or [],
                     "history_offset": 0,
                     "failed": True,
+                    "turn_exit_reason": "gateway_inactivity_timeout",
                 }
 
             # Track fallback model state: if the agent switched to a

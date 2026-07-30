@@ -80,8 +80,23 @@ async def handle(event_type: str, context: dict):
 | `session:reset` | 用户执行 `/new` 或 `/reset` | `platform`、`user_id`、`session_key` |
 | `agent:start` | Agent 开始处理消息 | `platform`、`user_id`、`session_id`、`message` |
 | `agent:step` | 工具调用循环的每次迭代 | `platform`、`user_id`、`session_id`、`iteration`、`tool_names` |
-| `agent:end` | Agent 完成处理 | `platform`、`user_id`、`session_id`、`message`、`response` |
+| `agent:end` | Agent 完成处理 | `platform`、`user_id`、`session_id`、`message`、`response`、`turn_exit_reason`、`api_call_count` |
 | `command:*` | 任意斜杠命令执行 | `platform`、`user_id`、`command`、`args` |
+
+`agent:end.turn_exit_reason` 会保留 Agent finalizer 给出的原因，将提前的用户停止分类为
+`interrupted_by_user`，并区分 Gateway 超时、断开连接、关闭和重启中止。缺失或格式错误的
+原因会归一化为 `unknown`；消费者在完成核对前应将此类视为可操作异常。
+Finalizer 原因文本在传递给 hook 前会折叠为单行并截断为 200 个字符。
+
+该字段采用开放词汇。具体的 Agent finalizer 原因会原样传递。Gateway 自有分类包括
+`interrupted_by_user`、`unknown`、`gateway_interrupt_unclassified`、
+`gateway_inactivity_timeout`、`gateway_sse_disconnect`、`gateway_shutdown`、
+`gateway_restart` 和 `gateway_agent_runtime_resolution_failed`。Proxy 模式使用
+`gateway_proxy_dependency_missing`、`gateway_proxy_not_configured`、
+`gateway_proxy_http_error`、`gateway_proxy_connection_error`、
+`gateway_proxy_partial_response`、`gateway_proxy_response_complete`、
+`gateway_proxy_empty_response` 和 `gateway_proxy_stale_generation`。消费者应兼容未来的 `gateway_*` 与
+`gateway_proxy_*` 扩展，不应把当前词汇表视为封闭枚举。
 
 #### 通配符匹配
 

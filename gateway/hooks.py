@@ -30,6 +30,17 @@ Context dict passed to ``agent:start`` / ``agent:end`` handlers:
 
 ``agent:end`` adds:
   response     -- agent response text (truncated to 500 chars)
+  turn_exit_reason -- why the agent loop ended (truncated to 200 chars);
+                      finalizer text is collapsed to a single line,
+                      early user stops normalize to "interrupted_by_user",
+                      gateway system aborts and unclassified interrupts remain
+                      distinct, and other missing or malformed reasons
+                      normalize to "unknown"
+  api_call_count -- non-negative API iterations consumed by the turn
+
+``turn_exit_reason`` is an open vocabulary: specific agent-finalizer reasons
+pass through, while gateway-owned classes use ``gateway_*`` and proxy classes
+use ``gateway_proxy_*`` prefixes.
 
 Handlers posting a follow-up into the same Telegram forum-topic should
 include ``message_thread_id=int(thread_id)`` when ``chat_type == "forum"``

@@ -1,5 +1,6 @@
 """Tests for gateway proxy mode — forwarding messages to a remote API server."""
 
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -39,10 +40,11 @@ def _make_source(platform=Platform.MATRIX):
 class _FakeSSEResponse:
     """Simulates an aiohttp response with SSE streaming."""
 
-    def __init__(self, status=200, sse_chunks=None, error_text=""):
+    def __init__(self, status=200, sse_chunks=None, error_text="", stream_error=None):
         self.status = status
         self._sse_chunks = sse_chunks or []
         self._error_text = error_text
+        self._stream_error = stream_error
         self.content = self
 
     async def text(self):
@@ -53,6 +55,8 @@ class _FakeSSEResponse:
             if isinstance(chunk, str):
                 chunk = chunk.encode("utf-8")
             yield chunk
+        if self._stream_error:
+            raise self._stream_error
 
     async def __aenter__(self):
         return self
@@ -228,6 +232,42 @@ class TestRunAgentViaProxy:
     """Test the actual proxy HTTP forwarding logic."""
 
     @pytest.mark.asyncio
+    async def test_reports_missing_aiohttp_dependency(self, monkeypatch):
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        runner = _make_runner()
+
+        with patch.dict(sys.modules, {"aiohttp": None}):
+            result = await runner._run_agent_via_proxy(
+                message="hi",
+                context_prompt="",
+                history=[],
+                source=_make_source(),
+                session_id="test",
+            )
+
+        assert "failed" not in result
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_dependency_missing"
+
+    @pytest.mark.asyncio
+    async def test_reports_missing_proxy_configuration(self, monkeypatch):
+        monkeypatch.delenv("GATEWAY_PROXY_URL", raising=False)
+        runner = _make_runner()
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            result = await runner._run_agent_via_proxy(
+                message="hi",
+                context_prompt="",
+                history=[],
+                source=_make_source(),
+                session_id="test",
+            )
+
+        assert "failed" not in result
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_not_configured"
+
+    @pytest.mark.asyncio
     async def test_builds_correct_request(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
         monkeypatch.setenv("GATEWAY_PROXY_KEY", "test-key-123")
@@ -303,6 +343,9 @@ class TestRunAgentViaProxy:
 
         assert "Proxy error (401)" in result["final_response"]
         assert result["api_calls"] == 0
+        assert "failed" not in result
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_http_error"
 
     @pytest.mark.asyncio
     async def test_handles_connection_error(self, monkeypatch):
@@ -333,6 +376,9 @@ class TestRunAgentViaProxy:
                     )
 
         assert "Proxy connection error" in result["final_response"]
+        assert "failed" not in result
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_connection_error"
 
     @pytest.mark.asyncio
     async def test_rejects_proxy_sse_without_line_boundary_after_buffer_cap(self, monkeypatch):
@@ -359,6 +405,66 @@ class TestRunAgentViaProxy:
         assert "Proxy connection error" in result["final_response"]
         assert "exceeded max buffer size" in result["final_response"]
         assert result["api_calls"] == 0
+        assert "failed" not in result
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_connection_error"
+
+    @pytest.mark.asyncio
+    async def test_partial_stream_preserves_response_without_downstream_partial_flow(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        monkeypatch.delenv("GATEWAY_PROXY_KEY", raising=False)
+        runner = _make_runner()
+        source = _make_source()
+        resp = _FakeSSEResponse(
+            status=200,
+            sse_chunks=[
+                b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            ],
+            stream_error=ConnectionError("stream interrupted"),
+        )
+        session = _FakeSession(resp)
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with _patch_aiohttp(session):
+                with patch("aiohttp.ClientTimeout"):
+                    result = await runner._run_agent_via_proxy(
+                        message="hi",
+                        context_prompt="",
+                        history=[],
+                        source=source,
+                        session_id="test",
+                    )
+
+        assert result["final_response"] == "partial"
+        assert "failed" not in result
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_partial_response"
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_has_distinct_exit_reason(self, monkeypatch):
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        monkeypatch.delenv("GATEWAY_PROXY_KEY", raising=False)
+        runner = _make_runner()
+        source = _make_source()
+        session = _FakeSession(_FakeSSEResponse(status=200, sse_chunks=[]))
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with _patch_aiohttp(session):
+                with patch("aiohttp.ClientTimeout"):
+                    result = await runner._run_agent_via_proxy(
+                        message="hi",
+                        context_prompt="",
+                        history=[],
+                        source=source,
+                        session_id="test",
+                    )
+
+        assert result["final_response"] == "(No response from remote agent)"
+        assert "failed" not in result
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_empty_response"
 
     @pytest.mark.asyncio
     async def test_skips_tool_messages_in_history(self, monkeypatch):
@@ -428,6 +534,9 @@ class TestRunAgentViaProxy:
         assert "messages" in result
         assert "api_calls" in result
         assert "tools" in result
+        assert "failed" not in result
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_response_complete"
         assert "history_offset" in result
         assert result["history_offset"] == 2  # len(history)
         assert "session_id" in result
@@ -466,6 +575,50 @@ class TestRunAgentViaProxy:
         assert result["final_response"] == ""
         assert result["messages"] == []
         assert result["api_calls"] == 0
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_stale_generation"
+
+    @pytest.mark.asyncio
+    async def test_proxy_post_stream_stale_generation_has_distinct_exit_reason(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        monkeypatch.delenv("GATEWAY_PROXY_KEY", raising=False)
+        runner = _make_runner()
+        source = _make_source()
+
+        resp = _FakeSSEResponse(
+            status=200,
+            sse_chunks=[
+                b'data: {"choices":[{"delta":{"content":"stale"}}]}\n\n'
+                b"data: [DONE]\n\n"
+            ],
+        )
+        session = _FakeSession(resp)
+
+        with patch.object(
+            runner,
+            "_is_session_run_current",
+            side_effect=[True, False],
+        ):
+            with patch("gateway.run._load_gateway_config", return_value={}):
+                with _patch_aiohttp(session):
+                    with patch("aiohttp.ClientTimeout"):
+                        result = await runner._run_agent_via_proxy(
+                            message="hi",
+                            context_prompt="",
+                            history=[],
+                            source=source,
+                            session_id="sess-123",
+                            session_key="test-key",
+                            run_generation=1,
+                        )
+
+        assert result["final_response"] == ""
+        assert result["messages"] == []
+        assert result["api_calls"] == 0
+        assert result["partial"] is False
+        assert result["turn_exit_reason"] == "gateway_proxy_stale_generation"
 
     @pytest.mark.asyncio
     async def test_no_auth_header_without_key(self, monkeypatch):
