@@ -44,9 +44,10 @@ Context dict passed to ``agent:start`` / ``agent:end`` handlers:
   stale        -- boolean; true when the run was superseded and its output was
                   discarded, false when this is the current delivered turn
 
-``turn_exit_reason`` is an open vocabulary: specific agent-finalizer reasons
-pass through. Gateway-owned classes include ``interrupted_by_user``,
-``unknown``, and the ``gateway_*`` / ``gateway_proxy_*`` families.
+``turn_exit_reason`` is an open vocabulary: specific agent-finalizer reason
+semantics pass through after the delivered string is normalized. Gateway-owned
+classes include ``interrupted_by_user``, ``unknown``, and the ``gateway_*`` /
+``gateway_proxy_*`` families.
 
 A superseded run still emits ``agent:end`` with ``stale == True`` and an empty
 ``response`` before its output is discarded. Non-proxy runs whose prior result

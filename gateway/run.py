@@ -22081,6 +22081,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],
+                    "failed": True,
                     "turn_exit_reason": "gateway_agent_runtime_resolution_failed",
                 }
 

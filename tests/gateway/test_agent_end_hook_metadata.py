@@ -742,7 +742,7 @@ async def test_run_agent_classifies_runtime_resolution_failure(
         session_key="agent:main:telegram:group:-1001:12345",
     )
 
-    assert "failed" not in result
+    assert result["failed"] is True
     assert result["turn_exit_reason"] == "gateway_agent_runtime_resolution_failed"
 
 
