@@ -784,6 +784,11 @@ def run_codex_app_server_turn(
             "completed": False,
             "partial": True,
             "interrupted": _user_interrupted,
+            "turn_exit_reason": (
+                "interrupted_by_user"
+                if _user_interrupted
+                else "local_processing_error(codex_app_server)"
+            ),
             **(
                 {"interrupt_message": _interrupt_message}
                 if _interrupt_message
@@ -921,6 +926,17 @@ def run_codex_app_server_turn(
         except Exception:
             logger.debug("background review spawn raised", exc_info=True)
 
+    if _user_interrupted:
+        turn_exit_reason = "interrupted_by_user"
+    elif turn.interrupted:
+        turn_exit_reason = "interrupted_during_api_call"
+    elif turn.error is not None:
+        turn_exit_reason = "local_processing_error(codex_app_server)"
+    elif not str(turn.final_text or "").strip():
+        turn_exit_reason = "empty_response_exhausted"
+    else:
+        turn_exit_reason = "text_response(finish_reason=stop)"
+
     return {
         "final_response": turn.final_text,
         "messages": messages,
@@ -928,6 +944,7 @@ def run_codex_app_server_turn(
         "completed": not turn.interrupted and turn.error is None,
         "partial": turn.interrupted or turn.error is not None,
         "interrupted": _user_interrupted,
+        "turn_exit_reason": turn_exit_reason,
         **(
             {"interrupt_message": _interrupt_message}
             if _interrupt_message

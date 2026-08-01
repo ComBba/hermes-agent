@@ -81,8 +81,39 @@ async def handle(event_type: str, context: dict):
 | `session:reset` | 用户执行 `/new` 或 `/reset` | `platform`、`user_id`、`session_key` |
 | `agent:start` | Agent 开始处理消息 | `platform`、`user_id`、`session_id`、`message` |
 | `agent:step` | 工具调用循环的每次迭代 | `platform`、`user_id`、`session_id`、`iteration`、`tool_names` |
-| `agent:end` | Agent 完成处理 | `platform`、`user_id`、`session_id`、`message`、`response` |
+| `agent:end` | Agent 完成处理 | `platform`、`user_id`、`session_id`、`message`、`response`、`turn_exit_reason`、`api_call_count`、`stale` |
 | `command:*` | 任意斜杠命令执行 | `platform`、`user_id`、`command`、`args` |
+
+`agent:end.turn_exit_reason` 会保留 Agent finalizer 给出的原因。显式 stop/reset 控制以及
+没有显式 finalizer 原因的轮次中途用户修正文本，都会分类为 `interrupted_by_user`；
+Gateway 超时、断开连接、关闭和重启中止则保持为不同分类。缺失或格式错误的原因会归一化为
+`unknown`；消费者在完成核对前应将此类视为可操作异常。Finalizer 原因文本在传递给 hook
+前会折叠为单行并截断为 200 个字符。
+
+`api_call_count` 是非负整数。值为 `0` 也可能表示未报告：Proxy 模式固定报告 `0`，
+缺失或格式错误的计数也会被限制为 `0`。
+`stale` 是布尔值：`true` 表示该运行已被更新的运行取代，输出已被丢弃；
+`false` 表示这是当前实际交付的运行。
+
+该字段采用开放词汇。具体的 Agent finalizer 原因语义会保留，但传递的字符串会
+折叠为单个可打印行并截断为 200 个字符。Gateway 自有分类包括
+`interrupted_by_user`、`unknown`、`gateway_interrupt_unclassified`、
+`gateway_inactivity_timeout`、`gateway_sse_disconnect`、`gateway_shutdown`、
+`gateway_restart`、`gateway_agent_runtime_resolution_failed` 和
+`gateway_unhandled_exception`。被取代的非 Proxy 运行可使用
+`gateway_stale_generation`。Proxy 模式使用
+`gateway_proxy_dependency_missing`、`gateway_proxy_not_configured`、
+`gateway_proxy_http_error`、`gateway_proxy_connection_error`、
+`gateway_proxy_partial_response`、`gateway_proxy_response_complete`、
+`gateway_proxy_empty_response` 和 `gateway_proxy_stale_generation`。消费者应兼容未来的 `gateway_*` 与
+`gateway_proxy_*` 扩展，不应把当前词汇表视为封闭枚举。
+
+被后续运行取代的运行仍会在丢弃结果前以 `stale: true` 触发 `agent:end`，且该事件的
+`response` 为空。如果非 Proxy 运行此前的结果正常或缺失原因，则使用
+`gateway_stale_generation`；此前正常完成的 Proxy 运行使用
+`gateway_proxy_stale_generation`。更具体的异常原因会保持不变。观察与清理处理器可以记录
+这些事件，但负责发送消息的处理器必须依据 `stale` 进行拦截；当它为 `true` 时，无论原因
+字符串为何都不得发布后续消息。
 
 #### 通配符匹配
 

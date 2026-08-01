@@ -73,6 +73,7 @@ def test_codex_success_flushes_and_reports_persisted():
     )
     assert result["completed"] is True
     assert isinstance(result["messages"][-1]["timestamp"], float)
+    assert result["turn_exit_reason"] == "text_response(finish_reason=stop)"
     # With the agent as sole persister, the gateway must SKIP its DB write.
     assert result["agent_persisted"] is True
 
@@ -101,8 +102,84 @@ def test_codex_user_interrupt_is_reported_and_cleared():
 
     assert result["interrupted"] is True
     assert result["interrupt_message"] == "new correction"
+    assert result["turn_exit_reason"] == "interrupted_by_user"
     agent.clear_interrupt.assert_called_once_with()
     assert agent._interrupt_requested is False
+
+
+def test_codex_non_user_interrupt_is_actionable():
+    agent = _make_agent(session_db=None)
+    turn = _make_turn()
+    turn.interrupted = True
+    turn.final_text = ""
+    agent._codex_session.run_turn.return_value = turn
+    agent._interrupt_requested = False
+
+    result = run_codex_app_server_turn(
+        agent,
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        effective_task_id="task-1",
+    )
+
+    assert result["interrupted"] is False
+    assert result["turn_exit_reason"] == "interrupted_during_api_call"
+
+
+def test_codex_empty_success_is_actionable():
+    agent = _make_agent(session_db=None)
+    turn = _make_turn()
+    turn.final_text = "   "
+    turn.projected_messages = []
+    agent._codex_session.run_turn.return_value = turn
+
+    result = run_codex_app_server_turn(
+        agent,
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        effective_task_id="task-1",
+    )
+
+    assert result["completed"] is True
+    assert result["turn_exit_reason"] == "empty_response_exhausted"
+
+
+def test_codex_turn_error_is_actionable():
+    agent = _make_agent(session_db=None)
+    turn = _make_turn()
+    turn.error = "synthetic failure"
+    turn.final_text = ""
+    agent._codex_session.run_turn.return_value = turn
+
+    result = run_codex_app_server_turn(
+        agent,
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        effective_task_id="task-1",
+    )
+
+    assert result["completed"] is False
+    assert result["turn_exit_reason"] == "local_processing_error(codex_app_server)"
+
+
+def test_codex_runtime_exception_is_actionable():
+    agent = _make_agent(session_db=None)
+    agent._codex_session.run_turn.side_effect = RuntimeError("synthetic crash")
+    agent._interrupt_requested = False
+
+    result = run_codex_app_server_turn(
+        agent,
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        effective_task_id="task-1",
+    )
+
+    assert result["completed"] is False
+    assert result["turn_exit_reason"] == "local_processing_error(codex_app_server)"
 
 
 def test_codex_turn_persists_each_message_exactly_once():

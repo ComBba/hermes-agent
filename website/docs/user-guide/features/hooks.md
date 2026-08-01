@@ -82,10 +82,49 @@ async def handle(event_type: str, context: dict):
 | `session:compress` | Context compression completed for a session | `platform`, `session_id`, `old_session_id` (empty when compacted in place), `in_place` (bool — `true` = transcript compacted on the same id, `false` = rotated from `old_session_id`), `compression_count` |
 | `agent:start` | Agent begins processing a message | `platform`, `user_id`, `chat_id`, `thread_id` (forum-topic / thread root id; empty when not in a thread), `chat_type` (`"dm"` \| `"group"` \| `"forum"`; empty if unknown), `session_id`, `message` (truncated to 500 chars) |
 | `agent:step` | Each iteration of the tool-calling loop | `platform`, `user_id`, `session_id`, `iteration`, `tool_names` |
-| `agent:end` | Agent finishes processing | same keys as `agent:start`, plus `response` (truncated to 500 chars) |
+| `agent:end` | Agent finishes processing | same keys as `agent:start`, plus `response` (truncated to 500 chars), `turn_exit_reason`, `api_call_count`, `stale` |
 | `reaction:added` | An emoji reaction was added to a message the bot can see (Slack adapter currently). Requires the `reactions:read` scope + the `reaction_added` bot event subscription; the bot must be a member of the channel. | `platform`, `reaction`, `user_id`, `item_user_id`, `item_type`, `channel_id`, `message_ts`, `team_id`, `event_ts`, `raw_event` |
 | `reaction:removed` | An emoji reaction was removed from a message the bot can see. Requires the `reaction_removed` bot event subscription. | same shape as `reaction:added` |
 | `command:*` | Any slash command executed | `platform`, `user_id`, `command`, `args` |
+
+`agent:end.turn_exit_reason` preserves the agent finalizer's reason. It
+classifies both explicit stop/reset controls and mid-turn user correction text
+without an explicit finalizer reason as `interrupted_by_user`, and keeps gateway
+timeout, disconnect, shutdown, and restart aborts distinct. Missing or malformed
+reasons are `unknown`; consumers should treat that class as actionable until
+reconciled. Finalizer reason text is collapsed to a single line and truncated
+to 200 characters before hook delivery.
+
+`api_call_count` is a non-negative integer. A value of `0` can also mean not
+reported: proxy mode reports `0`, and absent or malformed counts clamp to `0`.
+`stale` is a boolean: `true` means a newer run superseded this one and its
+output was discarded; `false` means this is the current delivered turn.
+
+The value is an open vocabulary. Specific agent-finalizer reason semantics are
+preserved, while the delivered string is collapsed to one printable line and
+truncated to 200 characters.
+Gateway-owned classes are `interrupted_by_user`, `unknown`,
+`gateway_interrupt_unclassified`, `gateway_inactivity_timeout`,
+`gateway_sse_disconnect`, `gateway_shutdown`, `gateway_restart`, and
+`gateway_agent_runtime_resolution_failed`, and `gateway_unhandled_exception`.
+A superseded non-proxy run can use
+`gateway_stale_generation`. Proxy mode
+uses `gateway_proxy_dependency_missing`, `gateway_proxy_not_configured`,
+`gateway_proxy_http_error`, `gateway_proxy_connection_error`,
+`gateway_proxy_partial_response`, `gateway_proxy_response_complete`,
+`gateway_proxy_empty_response`, and `gateway_proxy_stale_generation`.
+Consumers should recognize future
+`gateway_*` and `gateway_proxy_*` extensions without treating the vocabulary as
+closed.
+
+A superseded run still fires `agent:end` with `stale: true` before its
+discarded result returns. That event has an empty `response`. A non-proxy run
+whose prior result was normal or missing a reason uses
+`gateway_stale_generation`; an otherwise complete proxy run uses
+`gateway_proxy_stale_generation`. More specific abnormal reasons remain intact.
+Observation and cleanup handlers may record these events, but delivery-side
+handlers must gate on `stale` and must not post a follow-up when it is `true`,
+regardless of the reason string.
 
 #### Wildcard Matching
 
