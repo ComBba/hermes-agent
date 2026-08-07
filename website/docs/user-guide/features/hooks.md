@@ -99,12 +99,11 @@ reported: proxy mode reports `0`, and absent or malformed counts clamp to `0`.
 `stale` is a boolean: `true` means a newer run superseded this one and its
 output was discarded; `false` means this is the current delivered turn.
 
-The value is an open vocabulary. Specific agent-finalizer reason semantics are
-preserved, while the delivered string is collapsed to one printable line and
-truncated to 200 characters.
+`turn_exit_reason` is an open vocabulary, and specific agent-finalizer reason
+semantics are preserved.
 Gateway-owned classes are `interrupted_by_user`, `unknown`,
 `gateway_interrupt_unclassified`, `gateway_inactivity_timeout`,
-`gateway_sse_disconnect`, `gateway_shutdown`, `gateway_restart`, and
+`gateway_sse_disconnect`, `gateway_shutdown`, `gateway_restart`,
 `gateway_agent_runtime_resolution_failed`, and `gateway_unhandled_exception`.
 A superseded non-proxy run can use
 `gateway_stale_generation`. Proxy mode

@@ -94,8 +94,8 @@ Gateway 超时、断开连接、关闭和重启中止则保持为不同分类。
 `stale` 是布尔值：`true` 表示该运行已被更新的运行取代，输出已被丢弃；
 `false` 表示这是当前实际交付的运行。
 
-该字段采用开放词汇。具体的 Agent finalizer 原因语义会保留，但传递的字符串会
-折叠为单个可打印行并截断为 200 个字符。Gateway 自有分类包括
+`turn_exit_reason` 采用开放词汇，具体的 Agent finalizer 原因语义会保留。
+Gateway 自有分类包括
 `interrupted_by_user`、`unknown`、`gateway_interrupt_unclassified`、
 `gateway_inactivity_timeout`、`gateway_sse_disconnect`、`gateway_shutdown`、
 `gateway_restart`、`gateway_agent_runtime_resolution_failed` 和
