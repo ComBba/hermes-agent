@@ -30,6 +30,15 @@ Context dict passed to ``agent:start`` / ``agent:end`` handlers:
 
 ``agent:end`` adds:
   response     -- agent response text (truncated to 500 chars)
+  turn_exit_reason -- why the tool-calling loop ended. "text_response(...)" is
+                  the normal finish; "max_iterations_reached(n/N)",
+                  "interrupted_by_user", "interrupted_during_api_call",
+                  "budget_exhausted", "guardrail_halt",
+                  "all_retries_exhausted_no_response" and
+                  "empty_response_exhausted" are not. The response text alone
+                  cannot distinguish these -- an explanation is appended only
+                  when the reply is empty or a truncated fragment.
+  api_call_count -- API iterations this turn consumed
 
 Handlers posting a follow-up into the same Telegram forum-topic should
 include ``message_thread_id=int(thread_id)`` when ``chat_type == "forum"``
