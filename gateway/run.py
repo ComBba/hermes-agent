@@ -5241,11 +5241,30 @@ class TurnRunner:
             }
 
         pr = self._runner._provider_routing
+        from gateway.channel_reasoning import resolve_channel_reasoning_config
+        channel_reasoning_config = resolve_channel_reasoning_config(
+            ctx.user_config,
+            platform=ctx.source.platform,
+            chat_id=getattr(ctx.source, "chat_id", None),
+            thread_id=getattr(ctx.source, "thread_id", None),
+            parent_id=getattr(ctx.source, "parent_chat_id", None),
+            message=ctx.message,
+        )
         reasoning_config = self._runner._resolve_session_reasoning_config(
             source=ctx.source,
             session_key=ctx.session_key,
             model=model,
+            channel_reasoning_config=channel_reasoning_config,
         )
+        if channel_reasoning_config is not None:
+            logger.info(
+                "channel reasoning resolved: platform=%s chat=%s thread=%s model=%s effort=%s",
+                getattr(ctx.source.platform, "value", ctx.source.platform),
+                getattr(ctx.source, "chat_id", None),
+                getattr(ctx.source, "thread_id", None),
+                model,
+                channel_reasoning_config.get("effort"),
+            )
         self._runner._reasoning_config = reasoning_config
         self._runner._service_tier = self._runner._resolve_session_service_tier(
             source=ctx.source, session_key=ctx.session_key
@@ -9225,12 +9244,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         source: Optional[SessionSource] = None,
         session_key: Optional[str] = None,
         model: str = "",
+        channel_reasoning_config: Optional[dict] = None,
     ) -> dict | None:
         """Resolve reasoning effort for a session, honoring session overrides.
 
         Priority: session-scoped ``/reasoning --session`` override >
-        per-model override (``agent.reasoning_overrides``) > global
-        ``agent.reasoning_effort``. ``model`` should be the session's
+        automatic channel/thread policy > per-model override
+        (``agent.reasoning_overrides``) > global ``agent.reasoning_effort``.
+        ``model`` should be the session's
         *effective* model (session ``/model`` override included) so
         per-model overrides track what the session actually runs — when
         empty, the config's ``model.default`` is used.
@@ -9246,6 +9267,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _r_state = self._peek_session_state(resolved_session_key)
             if _r_state is not None and _r_state.conversation.reasoning_override is not None:
                 return _r_state.conversation.reasoning_override
+        if channel_reasoning_config is not None:
+            return dict(channel_reasoning_config)
         return self._load_reasoning_config(model)
 
     def _set_session_reasoning_override(
@@ -22142,9 +22165,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             pr = self._provider_routing
             max_iterations = _current_max_iterations()
-            reasoning_config = self._resolve_session_reasoning_config(
-                source=source, model=model
+            from gateway.channel_reasoning import resolve_channel_reasoning_config
+            channel_reasoning_config = resolve_channel_reasoning_config(
+                user_config,
+                platform=source.platform,
+                chat_id=getattr(source, "chat_id", None),
+                thread_id=getattr(source, "thread_id", None),
+                parent_id=getattr(source, "parent_chat_id", None),
+                message=prompt,
             )
+            reasoning_config = self._resolve_session_reasoning_config(
+                source=source,
+                model=model,
+                channel_reasoning_config=channel_reasoning_config,
+            )
+            if channel_reasoning_config is not None:
+                logger.info(
+                    "background channel reasoning resolved: platform=%s chat=%s thread=%s model=%s effort=%s",
+                    getattr(source.platform, "value", source.platform),
+                    getattr(source, "chat_id", None),
+                    getattr(source, "thread_id", None),
+                    model,
+                    channel_reasoning_config.get("effort"),
+                )
             self._reasoning_config = reasoning_config
             self._service_tier = self._resolve_session_service_tier(source=source)
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
