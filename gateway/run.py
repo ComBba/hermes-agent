@@ -5241,29 +5241,22 @@ class TurnRunner:
             }
 
         pr = self._runner._provider_routing
-        from gateway.channel_reasoning import resolve_channel_reasoning_config
-        channel_reasoning_config = resolve_channel_reasoning_config(
-            ctx.user_config,
-            platform=ctx.source.platform,
-            chat_id=getattr(ctx.source, "chat_id", None),
-            thread_id=getattr(ctx.source, "thread_id", None),
-            parent_id=getattr(ctx.source, "parent_chat_id", None),
-            message=ctx.message,
+        reasoning_config, applied_channel_reasoning = (
+            self._runner._resolve_turn_reasoning_config(
+                source=ctx.source,
+                session_key=ctx.session_key,
+                model=model,
+                message=ctx.message,
+            )
         )
-        reasoning_config = self._runner._resolve_session_reasoning_config(
-            source=ctx.source,
-            session_key=ctx.session_key,
-            model=model,
-            channel_reasoning_config=channel_reasoning_config,
-        )
-        if channel_reasoning_config is not None:
+        if applied_channel_reasoning is not None:
             logger.info(
                 "channel reasoning resolved: platform=%s chat=%s thread=%s model=%s effort=%s",
                 getattr(ctx.source.platform, "value", ctx.source.platform),
                 getattr(ctx.source, "chat_id", None),
                 getattr(ctx.source, "thread_id", None),
                 model,
-                channel_reasoning_config.get("effort"),
+                applied_channel_reasoning.get("effort"),
             )
         self._runner._reasoning_config = reasoning_config
         self._runner._service_tier = self._runner._resolve_session_service_tier(
@@ -9237,6 +9230,59 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             else:
                 value_tokens.append(token)
         return " ".join(value_tokens).strip().lower(), persist_global
+
+    def _resolve_turn_reasoning_config(
+        self,
+        *,
+        source: Optional[SessionSource],
+        session_key: Optional[str] = None,
+        model: str = "",
+        message: Any = "",
+    ) -> tuple[dict | None, dict | None]:
+        """Resolve a turn's reasoning config and the channel policy it applied.
+
+        Returns ``(reasoning_config, applied_channel_config)``. The second
+        value is the channel policy only when it is what the turn actually
+        runs at: a session-scoped ``/reasoning --session`` override outranks
+        it, and a caller that reported the policy regardless would name an
+        effort the turn did not use.
+
+        The policy is read from the runtime config, not the raw one, so a
+        value written as ``${VAR}`` is expanded before the effort allowlist
+        sees it. Unexpanded it fails that allowlist and the policy resolves
+        to nothing -- silently doing less rather than reporting a bad value.
+
+        Both turn paths go through here. They previously resolved this
+        inline, twice, and carried the same two defects in both copies.
+
+        Known gap: a policy bound to a parent channel does not reach turns
+        whose source omits ``parent_chat_id``, which native Discord slash
+        commands and thread starters currently do. Policies bound to the
+        thread or the channel itself are unaffected.
+        """
+        from gateway.channel_reasoning import resolve_channel_reasoning_config
+
+        channel_config = resolve_channel_reasoning_config(
+            _load_gateway_runtime_config(),
+            platform=getattr(source, "platform", None),
+            chat_id=getattr(source, "chat_id", None),
+            thread_id=getattr(source, "thread_id", None),
+            parent_id=getattr(source, "parent_chat_id", None),
+            message=message,
+        )
+        reasoning_config = self._resolve_session_reasoning_config(
+            source=source,
+            session_key=session_key,
+            model=model,
+            channel_reasoning_config=channel_config,
+        )
+        applied = (
+            channel_config
+            if channel_config is not None
+            and reasoning_config == channel_config
+            else None
+        )
+        return reasoning_config, applied
 
     def _resolve_session_reasoning_config(
         self,
@@ -22165,28 +22211,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             pr = self._provider_routing
             max_iterations = _current_max_iterations()
-            from gateway.channel_reasoning import resolve_channel_reasoning_config
-            channel_reasoning_config = resolve_channel_reasoning_config(
-                user_config,
-                platform=source.platform,
-                chat_id=getattr(source, "chat_id", None),
-                thread_id=getattr(source, "thread_id", None),
-                parent_id=getattr(source, "parent_chat_id", None),
-                message=prompt,
+            reasoning_config, applied_channel_reasoning = (
+                self._resolve_turn_reasoning_config(
+                    source=source,
+                    model=model,
+                    message=prompt,
+                )
             )
-            reasoning_config = self._resolve_session_reasoning_config(
-                source=source,
-                model=model,
-                channel_reasoning_config=channel_reasoning_config,
-            )
-            if channel_reasoning_config is not None:
+            if applied_channel_reasoning is not None:
                 logger.info(
                     "background channel reasoning resolved: platform=%s chat=%s thread=%s model=%s effort=%s",
                     getattr(source.platform, "value", source.platform),
                     getattr(source, "chat_id", None),
                     getattr(source, "thread_id", None),
                     model,
-                    channel_reasoning_config.get("effort"),
+                    applied_channel_reasoning.get("effort"),
                 )
             self._reasoning_config = reasoning_config
             self._service_tier = self._resolve_session_service_tier(source=source)
