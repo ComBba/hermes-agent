@@ -12,7 +12,16 @@ from typing import Any, Mapping, Optional
 from hermes_constants import parse_reasoning_effort
 
 
-_ALLOWED_EFFORTS = {"medium", "high", "xhigh", "ultra"}
+# Ordered weakest to strongest. Terms escalate along this ladder and never
+# down it: a channel that configures ``default_effort: ultra`` has already
+# decided its floor, and a message that happens to contain a ``high_terms``
+# entry is asking for at least high, not for exactly high.
+_EFFORT_LADDER = ("medium", "high", "xhigh", "ultra")
+_ALLOWED_EFFORTS = frozenset(_EFFORT_LADDER)
+
+
+def _at_least(effort: str, floor: str) -> str:
+    return max(effort, floor, key=_EFFORT_LADDER.index)
 
 
 def _platform_name(platform: Any) -> str:
@@ -90,9 +99,9 @@ def resolve_channel_reasoning_config(
     text = _normalize(message)
     effort = default
     if _contains_any(text, policy.get("high_terms")):
-        effort = "high"
+        effort = _at_least(effort, "high")
     if _contains_any(text, policy.get("xhigh_terms")):
-        effort = "xhigh"
+        effort = _at_least(effort, "xhigh")
 
     ultra_cfg = policy.get("ultra")
     if isinstance(ultra_cfg, Mapping) and ultra_cfg.get("enabled") is True:
@@ -102,7 +111,10 @@ def resolve_channel_reasoning_config(
         in_thread = bool(str(thread_id or "").strip())
         if parallel_requested:
             if blocked or (requires_thread and not in_thread):
-                effort = "xhigh"
+                # Refusing the escalation is not a reason to drop below the
+                # channel's own floor: a blocked ultra request in a channel
+                # configured for ultra still gets what the channel configured.
+                effort = _at_least(effort, "xhigh")
             else:
                 effort = "ultra"
 

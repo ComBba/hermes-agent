@@ -128,3 +128,180 @@ def test_manual_session_override_has_priority(monkeypatch):
         channel_reasoning_config={"enabled": True, "effort": "xhigh"},
     )
     assert resolved == {"enabled": True, "effort": "low"}
+
+
+ESCALATION_ONLY = "1500000000000000001"
+
+
+@pytest.fixture
+def high_floor_config():
+    """A channel whose own floor is already above what its terms name.
+
+    `default_effort` accepts every rung of the ladder, so a channel may
+    declare `ultra` outright. Term lists then say "at least this much",
+    which is only meaningful if a match cannot land below the floor the
+    channel already chose.
+    """
+    return {
+        "discord": {
+            "channel_reasoning_policies": {
+                ESCALATION_ONLY: {
+                    "default_effort": "ultra",
+                    "high_terms": ["요약"],
+                    "xhigh_terms": ["근본 원인"],
+                    "ultra": {
+                        "enabled": True,
+                        "terms": ["병렬"],
+                        "requires_thread": True,
+                        "blocked_terms": ["배포"],
+                    },
+                }
+            }
+        }
+    }
+
+
+def test_high_term_does_not_lower_an_ultra_default(high_floor_config):
+    assert resolve(high_floor_config, ESCALATION_ONLY, "요약해줘") == {
+        "enabled": True,
+        "effort": "ultra",
+    }
+
+
+def test_xhigh_term_does_not_lower_an_ultra_default(high_floor_config):
+    assert resolve(high_floor_config, ESCALATION_ONLY, "근본 원인을 찾아줘") == {
+        "enabled": True,
+        "effort": "ultra",
+    }
+
+
+def test_blocked_ultra_request_does_not_lower_an_ultra_default(high_floor_config):
+    # Refusing the escalation is not a reason to drop below the floor the
+    # channel configured without any term at all.
+    assert resolve(high_floor_config, ESCALATION_ONLY, "병렬로 배포해줘") == {
+        "enabled": True,
+        "effort": "ultra",
+    }
+
+
+def test_ultra_request_outside_a_thread_does_not_lower_the_default(high_floor_config):
+    assert resolve(
+        high_floor_config, ESCALATION_ONLY, "병렬로 처리해줘", thread_id=None
+    ) == {"enabled": True, "effort": "ultra"}
+
+
+def test_terms_still_escalate_from_a_low_default(config):
+    # The guard above must not turn escalation off: a medium channel still
+    # climbs when a term matches.
+    assert resolve(config, RESERVATION, "근본 원인 분석") == {
+        "enabled": True,
+        "effort": "xhigh",
+    }
+
+
+def _turn_runner(session_override=None):
+    """A GatewayRunner stand-in carrying only what turn resolution reads."""
+    from gateway.run import GatewayRunner
+
+    state = (
+        None
+        if session_override is None
+        else SimpleNamespace(
+            conversation=SimpleNamespace(reasoning_override=session_override)
+        )
+    )
+    fake = SimpleNamespace(
+        _peek_session_state=lambda key: state,
+        _load_reasoning_config=lambda model: {"enabled": True, "effort": "high"},
+    )
+    fake._resolve_session_reasoning_config = (
+        lambda **kwargs: GatewayRunner._resolve_session_reasoning_config(
+            fake, **kwargs
+        )
+    )
+    fake._resolve_turn_reasoning_config = (
+        lambda **kwargs: GatewayRunner._resolve_turn_reasoning_config(
+            fake, **kwargs
+        )
+    )
+    return fake
+
+
+def _discord_source(chat_id, thread_id="thread-1"):
+    return SimpleNamespace(
+        platform="discord",
+        chat_id=chat_id,
+        thread_id=thread_id,
+        parent_chat_id=chat_id,
+    )
+
+
+def test_applied_policy_is_reported_when_nothing_outranks_it(monkeypatch, config):
+    """Both turn paths log from the second return value, so it must be set."""
+    from gateway import run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: config)
+    resolved, applied = _turn_runner()._resolve_turn_reasoning_config(
+        source=_discord_source(DEV),
+        session_key="session-1",
+        model="gpt-5.6-sol",
+        message="현재 상태를 확인해줘",
+    )
+    assert resolved == {"enabled": True, "effort": "high"}
+    assert applied == resolved
+
+
+def test_applied_policy_is_not_reported_when_a_session_override_wins(
+    monkeypatch, config
+):
+    """The turn log must describe the effort the turn actually ran at.
+
+    A session-scoped `/reasoning --session` override outranks any channel
+    policy, so reporting the policy merely because it matched would name an
+    effort the turn did not use -- defeating what the log exists for.
+    """
+    from gateway import run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: config)
+    override = {"enabled": True, "effort": "low"}
+    resolved, applied = _turn_runner(override)._resolve_turn_reasoning_config(
+        source=_discord_source(DEV),
+        session_key="session-1",
+        model="gpt-5.6-sol",
+        message="현재 상태를 확인해줘",
+    )
+    assert resolved == override
+    assert applied is None
+
+
+def test_policy_values_are_read_after_env_expansion(monkeypatch):
+    """`${VAR}` in a policy must be expanded before the effort allowlist.
+
+    Unexpanded, `default_effort` holds the literal placeholder, fails the
+    allowlist, and the resolver returns None -- the policy silently does
+    nothing instead of reporting a bad value. `_load_gateway_runtime_config`
+    exists for exactly this, so turn resolution must read through it.
+    """
+    from gateway import run as gateway_run
+
+    monkeypatch.setenv("CHANNEL_EFFORT", "xhigh")
+    raw = {
+        "discord": {
+            "channel_reasoning_policies": {
+                ESCALATION_ONLY: {"default_effort": "${CHANNEL_EFFORT}"}
+            }
+        }
+    }
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: raw)
+
+    # Read raw, the placeholder survives and the policy resolves to nothing.
+    assert resolve(raw, ESCALATION_ONLY, "무엇이든") is None
+
+    resolved, applied = _turn_runner()._resolve_turn_reasoning_config(
+        source=_discord_source(ESCALATION_ONLY),
+        session_key="session-1",
+        model="gpt-5.6-sol",
+        message="무엇이든",
+    )
+    assert resolved == {"enabled": True, "effort": "xhigh"}
+    assert applied == resolved
