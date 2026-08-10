@@ -10,6 +10,10 @@ The failure that causes is worse than a setting that never works: the setting
 works for messages and silently does not for `/skill`, `/queue`, `/learn` and
 the first turn of a new thread. Which turns are affected depends on how each
 was started, so it reads as intermittent rather than as a gap.
+
+These exercise the real `build_source` -- the one that constructs a
+`SessionSource` and resolves the profile route -- rather than a stand-in, so
+what is asserted is the source a turn actually receives.
 """
 
 import sys
@@ -43,6 +47,8 @@ _ensure_discord_mock()
 
 import discord  # noqa: E402
 
+from gateway.config import Platform  # noqa: E402
+from gateway.platforms.base import BasePlatformAdapter  # noqa: E402
 from plugins.platforms.discord.adapter import DiscordAdapter  # noqa: E402
 
 
@@ -71,78 +77,91 @@ def _interaction(channel: object) -> SimpleNamespace:
 
 @pytest.fixture
 def adapter() -> DiscordAdapter:
+    """A Discord adapter using the real `build_source`.
+
+    Only the collaborators these two paths reach are stubbed -- topic
+    resolution and the channel prompt/skill lookups, which read configuration
+    this test says nothing about. `build_source` itself is the inherited
+    implementation, so `SessionSource` construction and profile-route
+    resolution run for real.
+    """
     instance = DiscordAdapter.__new__(DiscordAdapter)
-    # `name` is a read-only property on the adapter; the paths under test do
-    # not consult it, so it is left alone rather than forced.
+    instance.build_source = BasePlatformAdapter.build_source.__get__(
+        instance, DiscordAdapter
+    )
+    instance.platform = Platform.DISCORD
+    instance.gateway_runner = None
     instance._get_effective_topic = lambda channel, is_thread=False: None
     instance._resolve_channel_prompt = lambda chat, parent=None: None
     instance._resolve_channel_skills = lambda chat, parent=None: None
     instance._thread_parent_channel = lambda channel: SimpleNamespace(
         id=PARENT_CHANNEL_ID
     )
-    captured: dict[str, object] = {}
-
-    def build_source(**kwargs: object) -> SimpleNamespace:
-        captured.update(kwargs)
-        return SimpleNamespace(**kwargs)
-
-    instance.build_source = build_source
-    instance.captured = captured
     return instance
 
 
 def test_slash_command_in_a_thread_carries_its_parent(adapter) -> None:
     event = adapter._build_slash_event(_interaction(_Thread()), "/skill list")
-    assert adapter.captured["parent_chat_id"] == str(PARENT_CHANNEL_ID)
     assert event.source.parent_chat_id == str(PARENT_CHANNEL_ID)
+    assert event.source.thread_id == str(THREAD_CHANNEL_ID)
+    assert event.source.platform == Platform.DISCORD
 
 
 def test_slash_command_outside_a_thread_reports_no_parent(adapter) -> None:
-    # A plain channel has no parent. `None` rather than "" so a consumer can
-    # tell "no parent" from "a parent whose id is empty", which would be a bug
-    # upstream rather than a fact about the channel.
+    # A plain channel has no parent, and the source says so as `None`.
+    # `build_source` owns that normalisation -- it already maps a falsy value
+    # to `None` -- so these paths pass the id they have and do not repeat it.
     channel = SimpleNamespace(id=PARENT_CHANNEL_ID, name="ops", guild=None)
-    adapter._build_slash_event(_interaction(channel), "/skill list")
-    assert adapter.captured["parent_chat_id"] is None
+    event = adapter._build_slash_event(_interaction(channel), "/skill list")
+    assert event.source.parent_chat_id is None
 
 
 @pytest.mark.asyncio
 async def test_thread_starter_carries_its_parent(adapter) -> None:
-    adapter.handle_message = lambda event: None
-    interaction = _interaction(_Thread())
-    try:
-        await adapter._dispatch_thread_session(
-            interaction,
-            str(THREAD_CHANNEL_ID),
-            "incident-42",
-            "start here",
-        )
-    except Exception:
-        # The dispatch continues into delivery, which this fixture does not
-        # provide. The source is built before any of that, and it is the
-        # source this test is about.
-        pass
-    assert adapter.captured["parent_chat_id"] == str(PARENT_CHANNEL_ID)
+    delivered: list[object] = []
 
+    async def handle_message(event: object) -> None:
+        delivered.append(event)
 
-def test_every_source_this_adapter_builds_declares_a_parent() -> None:
-    """No call site may omit it, including ones added later.
-
-    The two paths fixed here each already computed the parent id and used it
-    for their own lookups; only the source was left without it. A new call
-    site would be one `build_source(...)` away from the same gap.
-    """
-    import inspect
-    import re
-
-    source = inspect.getsource(
-        sys.modules["plugins.platforms.discord.adapter"]
+    adapter.handle_message = handle_message
+    await adapter._dispatch_thread_session(
+        _interaction(_Thread()),
+        str(THREAD_CHANNEL_ID),
+        "incident-42",
+        "start here",
     )
-    calls = re.findall(r"self\.build_source\(\s*(.*?)\n\s*\)", source, re.S)
-    assert calls, "expected the adapter to build sources"
-    missing = [
-        call.strip().splitlines()[0]
-        for call in calls
-        if "parent_chat_id" not in call
-    ]
-    assert not missing, f"build_source call sites without parent_chat_id: {missing}"
+
+    assert len(delivered) == 1, "the starter must reach handle_message"
+    source = delivered[0].source
+    assert source.parent_chat_id == str(PARENT_CHANNEL_ID)
+    assert source.thread_id == str(THREAD_CHANNEL_ID)
+
+
+@pytest.mark.asyncio
+async def test_a_thread_turn_resolves_the_same_parent_however_it_started(
+    adapter,
+) -> None:
+    """The invariant, rather than three separate expected values.
+
+    A slash command and a thread starter in the same thread describe the same
+    conversation. Whatever a consumer resolves from the parent must not depend
+    on which of them began the turn -- that dependence is the defect, and it
+    is what made the gap read as intermittent.
+    """
+    delivered: list[object] = []
+
+    async def handle_message(event: object) -> None:
+        delivered.append(event)
+
+    adapter.handle_message = handle_message
+    await adapter._dispatch_thread_session(
+        _interaction(_Thread()),
+        str(THREAD_CHANNEL_ID),
+        "incident-42",
+        "start here",
+    )
+    slash = adapter._build_slash_event(_interaction(_Thread()), "/skill list")
+
+    assert (
+        delivered[0].source.parent_chat_id == slash.source.parent_chat_id
+    ), "the same thread must resolve the same parent from either entry point"

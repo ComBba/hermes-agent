@@ -5849,7 +5849,7 @@ class DiscordAdapter(BasePlatformAdapter):
             user_id=str(interaction.user.id),
             user_name=interaction.user.display_name,
             thread_id=thread_id,
-            parent_chat_id=parent_id or None,
+            parent_chat_id=parent_id,
             chat_topic=chat_topic,
         )
 
@@ -5946,7 +5946,7 @@ class DiscordAdapter(BasePlatformAdapter):
             user_id=str(interaction.user.id),
             user_name=interaction.user.display_name,
             thread_id=thread_id,
-            parent_chat_id=_parent_id or None,
+            parent_chat_id=_parent_id,
             chat_topic=chat_topic,
         )
         _skills = self._resolve_channel_skills(thread_id, _parent_id or None)
