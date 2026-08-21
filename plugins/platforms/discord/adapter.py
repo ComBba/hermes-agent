@@ -3139,6 +3139,17 @@ class DiscordAdapter(BasePlatformAdapter):
         """Reduce command payloads to the semantic fields Hermes manages."""
         contexts = payload.get("contexts")
         integration_types = payload.get("integration_types")
+        normalized_integration_types = (
+            sorted(int(i) for i in integration_types) if integration_types else None
+        )
+        # Discord materializes an omitted integration_types field as [0, 1]
+        # (guild install + user install) on the global-command read path. The
+        # local discord.py Command.to_dict() payload keeps the same default as
+        # None. Treat those two representations as equivalent; otherwise every
+        # reconnect false-diffs every command and exhausts the command-management
+        # rate-limit bucket by deleting and recreating the whole tree.
+        if normalized_integration_types == [0, 1]:
+            normalized_integration_types = None
         return {
             "type": int(payload.get("type", 1) or 1),
             "name": str(payload.get("name", "") or ""),
@@ -3149,9 +3160,7 @@ class DiscordAdapter(BasePlatformAdapter):
             "dm_permission": bool(payload.get("dm_permission", True)),
             "nsfw": bool(payload.get("nsfw", False)),
             "contexts": sorted(int(c) for c in contexts) if contexts else None,
-            "integration_types": (
-                sorted(int(i) for i in integration_types) if integration_types else None
-            ),
+            "integration_types": normalized_integration_types,
             "options": [
                 self._canonicalize_app_command_option(item)
                 for item in payload.get("options", []) or []
