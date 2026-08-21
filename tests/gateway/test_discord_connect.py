@@ -601,6 +601,25 @@ async def test_safe_sync_reads_permission_attrs_from_existing_command():
     fake_http.upsert_global_command.assert_not_awaited()
 
 
+def test_default_integration_types_match_discord_readback():
+    """Discord expands an omitted global-command default to [0, 1]."""
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    desired = {
+        "name": "skill",
+        "description": "Run a Hermes skill",
+        "type": 1,
+        "options": [],
+    }
+    remote = {**desired, "integration_types": [0, 1]}
+
+    assert adapter._canonicalize_app_command_payload(
+        desired
+    ) == adapter._canonicalize_app_command_payload(remote)
+    assert adapter._canonicalize_app_command_payload(
+        {**desired, "integration_types": [0]}
+    )["integration_types"] == [0]
+
+
 # ============================================================================
 # #31049: unconfigured platform skips reconnection (non-retryable fatal error)
 # ============================================================================
@@ -706,4 +725,3 @@ class TestPrivilegedIntentsRequiredFatal:
         assert "Message Content Intent" in (adapter.fatal_error_message or "")
         assert "discord.com/developers/applications" in (adapter.fatal_error_message or "")
         assert adapter._bot_task is None
-
