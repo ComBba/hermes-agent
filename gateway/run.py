@@ -20214,7 +20214,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             agent_messages = agent_result.get("messages", [])
             _response_time = time.time() - _msg_start_time
-            _api_calls = agent_result.get("api_calls", 0)
+            # Normalize hook termination metadata before any diagnostic
+            # logging. ``api_calls`` crosses a plugin/provider boundary and a
+            # malformed value must not make the logger raise, which would
+            # overwrite the agent's real exit reason with a gateway crash.
+            agent_end_metadata = _gateway_agent_end_metadata(agent_result)
+            _api_calls = agent_end_metadata["api_call_count"]
             _resp_len = len(response)
             logger.info(
                 "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",
@@ -20372,8 +20377,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Retry/error-backoff interrupts can bypass turn_finalizer. Preserve
             # explicit agent reasons, distinguish gateway system aborts from
             # user stops, and make every otherwise-missing class "unknown".
-            agent_end_metadata = _gateway_agent_end_metadata(agent_result)
-
             # Emit agent:end hook
             agent_end_emitted = True
             await self.hooks.emit("agent:end", {
