@@ -120,6 +120,46 @@ def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
 class TestPluginDiscovery:
     """Tests for plugin discovery from directories and entry points."""
 
+    def test_multi_agent_bundle_ignores_non_hermes_hidden_manifests(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from hermes_cli import plugins as plugins_mod
+
+        home = tmp_path / "home"
+        bundle = home / "plugins" / "bundle"
+        hermes_plugin = bundle / ".hermes-plugin"
+        hermes_plugin.mkdir(parents=True)
+        (hermes_plugin / "plugin.yaml").write_text(
+            yaml.safe_dump({"name": "bundle", "version": "1.0.0"})
+        )
+        (hermes_plugin / "__init__.py").write_text("def register(ctx):\n    pass\n")
+        for ecosystem in (".codex-plugin", ".claude-plugin"):
+            foreign = bundle / ecosystem
+            foreign.mkdir()
+            (foreign / "plugin.json").write_text(
+                json.dumps({"name": f"foreign-{ecosystem}"})
+            )
+        (home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["bundle/.hermes-plugin"]}})
+        )
+        empty_bundled = tmp_path / "bundled"
+        empty_bundled.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr(
+            plugins_mod, "get_bundled_plugins_dir", lambda: empty_bundled
+        )
+
+        with caplog.at_level(logging.WARNING):
+            manager = PluginManager()
+            manager.discover_and_load()
+
+        assert manager._plugins["bundle/.hermes-plugin"].enabled is True
+        assert not [
+            record
+            for record in caplog.records
+            if "Failed to parse" in record.getMessage()
+        ]
+
     def test_enabled_portable_plugin_registers_components(
         self, tmp_path, monkeypatch
     ):

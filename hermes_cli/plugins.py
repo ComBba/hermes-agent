@@ -4203,6 +4203,15 @@ class PluginManager:
         for child in sorted(path.iterdir()):
             if not child.is_dir():
                 continue
+            # Multi-agent plugin bundles (for example Superpowers) keep
+            # ecosystem-specific manifests in hidden sibling directories such
+            # as .codex-plugin and .claude-plugin. Hermes owns only the
+            # .hermes-plugin directory; attempting to parse every hidden
+            # sibling as a portable Agent Plugin produces misleading startup
+            # warnings and can admit an unintended manifest if another
+            # ecosystem later adopts a compatible schema.
+            if child.name.startswith(".") and child.name != ".hermes-plugin":
+                continue
             if depth == 0 and skip_names and child.name in skip_names:
                 continue
             manifest_file = child / "plugin.yaml"
