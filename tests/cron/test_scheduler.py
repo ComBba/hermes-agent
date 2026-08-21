@@ -19,6 +19,7 @@ from cron.scheduler import (
     _resolve_origin,
     _send_media_via_adapter,
     _summarize_cron_failure_for_delivery,
+    _target_matches_origin_chat,
     run_job,
 )
 from tools.env_passthrough import clear_env_passthrough
@@ -320,6 +321,24 @@ class TestRoutingIntents:
 
 class TestDeliverResultWrapping:
     """Verify that cron deliveries are wrapped with header/footer and no longer mirrored."""
+
+    def test_cross_channel_target_does_not_match_origin_chat(self):
+        origin = {
+            "platform": "discord",
+            "chat_id": "1531229126784975038",
+            "thread_id": "1531229126784975038",
+        }
+
+        assert not _target_matches_origin_chat(
+            origin,
+            "discord",
+            "1531296526884667594",
+        )
+        assert _target_matches_origin_chat(
+            origin,
+            "DISCORD",
+            "1531229126784975038",
+        )
 
     def _safe_media_path(self, tmp_path, monkeypatch, name, data=b"media"):
         root = tmp_path / "media-cache"

@@ -1549,6 +1549,17 @@ def _cron_mirror_delivery_enabled(job: dict, cfg: Optional[dict] = None) -> bool
         return False
 
 
+def _target_matches_origin_chat(
+    origin: dict, platform_name: str, chat_id: str
+) -> bool:
+    """True when target and origin identify the same platform chat."""
+    if not origin:
+        return False
+    if str(origin.get("platform", "")).lower() != str(platform_name).lower():
+        return False
+    return str(origin.get("chat_id", "")) == str(chat_id)
+
+
 def _target_matches_origin(origin: dict, platform_name: str, chat_id: str,
                            thread_id: Optional[str]) -> bool:
     """True when a delivery target is the job's own origin conversation.
@@ -1568,11 +1579,7 @@ def _target_matches_origin(origin: dict, platform_name: str, chat_id: str,
     session exists, the target was never the origin conversation, so we simply
     do not mirror.
     """
-    if not origin:
-        return False
-    if str(origin.get("platform", "")).lower() != str(platform_name).lower():
-        return False
-    if str(origin.get("chat_id", "")) != str(chat_id):
+    if not _target_matches_origin_chat(origin, platform_name, chat_id):
         return False
     # thread_id must match when the origin pins one (topic-scoped chats); a
     # target that lost the thread_id is not the same conversation lane.
@@ -2628,9 +2635,20 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         # Diagnostic: log thread_id for topic-aware delivery debugging
         origin = _resolve_origin(job) or {}
         origin_thread = origin.get("thread_id")
-        if origin_thread and not thread_id:
+        if (
+            origin_thread
+            and not thread_id
+            and _target_matches_origin_chat(origin, platform_name, chat_id)
+        ):
             logger.warning(
                 "Job '%s': origin has thread_id=%s but delivery target lost it "
+                "(deliver=%s, target=%s)",
+                job["id"], origin_thread, job.get("deliver", "local"), target,
+            )
+        elif origin_thread and not thread_id:
+            logger.debug(
+                "Job '%s': explicit delivery target differs from the origin; "
+                "origin thread_id=%s is intentionally not inherited "
                 "(deliver=%s, target=%s)",
                 job["id"], origin_thread, job.get("deliver", "local"), target,
             )
