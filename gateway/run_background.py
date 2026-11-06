@@ -61,7 +61,14 @@ class GatewayBackgroundMixin:
             enabled_toolsets, disabled_toolsets = self._resolve_turn_toolsets(user_config, source, platform_key)
             pr = self._provider_routing
             max_iterations = _current_max_iterations()
-            reasoning_config = self._resolve_session_reasoning_config(source=source, model=model)
+            from gateway.channel_reasoning import resolve_turn_reasoning
+            reasoning_config, applied_channel_reasoning = resolve_turn_reasoning(
+                self, source=source, model=model, message=prompt)
+            if applied_channel_reasoning is not None:
+                logger.info(
+                    "background channel reasoning resolved: platform=%s chat=%s thread=%s model=%s effort=%s",
+                    getattr(source.platform, "value", source.platform), getattr(source, "chat_id", None),
+                    getattr(source, "thread_id", None), model, applied_channel_reasoning.get("effort"))
             self._reasoning_config = reasoning_config
             self._service_tier = self._resolve_session_service_tier(source=source)
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
