@@ -219,6 +219,9 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             return prepared
         history, message_text = prepared.history, prepared.message_text
 
+        # REL-01: every agent:start is paired with exactly one agent:end, including a crash.
+        hook_ctx = None
+        agent_end_emitted = False
         try:
             hook_ctx = {
                 "platform": source.platform.value if source.platform else "",
@@ -283,6 +286,12 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             await self._hmwa_stop_typing_for_turn(event, source)
 
             if not self._is_session_run_current(_quick_key, run_generation):
+                # A superseded run still reports its end before the output is dropped.
+                from gateway.turn_exit_metadata import agent_end_metadata
+                agent_end_emitted = True
+                await self.hooks.emit("agent:end", {
+                    **hook_ctx, "response": "", **agent_end_metadata(agent_result, stale=True),
+                })
                 self._hmwa_discard_stale_result(source, _quick_key, run_generation)
                 return None
 
@@ -297,6 +306,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             # Streaming already delivered the body: the footer goes out as a trailing send instead.
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
+            agent_end_emitted = True
             await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response)
 
             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (
@@ -323,6 +333,14 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             )
 
         except Exception as e:
+            if hook_ctx is not None and not agent_end_emitted:
+                # The most abnormal exit there is -- a crash -- must not be the silent one.
+                agent_end_emitted = True
+                try:
+                    from gateway.turn_exit_metadata import crash_metadata
+                    await self.hooks.emit("agent:end", {**hook_ctx, "response": "", **crash_metadata()})
+                except Exception:
+                    logger.debug("agent:end crash emit failed", exc_info=True)
             return await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
         finally:
             # Restore session context variables to their pre-handler state
