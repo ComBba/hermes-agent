@@ -217,14 +217,24 @@ class GatewayConfigLoadersMixin:
         value = " ".join(token for token in tokens if token != "--global")
         return value.strip().lower(), "--global" in tokens
 
+    def _resolve_turn_reasoning_config(
+        self, *, source: Optional[SessionSource], session_key: Optional[str] = None,
+        model: str = "", message: Any = "",
+    ) -> tuple[dict | None, dict | None]:
+        """See ``gateway.channel_reasoning.resolve_turn_reasoning``."""
+        from gateway.channel_reasoning import resolve_turn_reasoning
+        return resolve_turn_reasoning(self, source=source, session_key=session_key, model=model, message=message)
+
     def _resolve_session_reasoning_config(
         self, *, source: Optional[SessionSource] = None, session_key: Optional[str] = None,
-        model: str = "",
+        model: str = "", channel_reasoning_config: Optional[dict] = None,
     ) -> dict | None:
-        """Session ``/reasoning --session`` > per-model ``agent.reasoning_overrides`` > global.
+        """Session ``/reasoning --session`` > local session policy > channel/thread policy >
+        per-model ``agent.reasoning_overrides`` > global.
 
         ``model`` must be the session's *effective* model (session ``/model`` override included);
-        empty uses ``model.default``.
+        empty uses ``model.default``. ``channel_reasoning_config`` is the already-resolved
+        ``channel_reasoning_policies`` entry for this turn (see ``_resolve_turn_reasoning_config``).
         """
         resolved_session_key = self._resolve_session_key_or_none(source, session_key)
         if resolved_session_key:
@@ -235,6 +245,8 @@ class GatewayConfigLoadersMixin:
         if (policy := local_policy(self, source)) is not None:
             # A local session runs its frozen (or followed) level, not the profile's.
             return policy.current_reasoning_config(self, resolved_session_key)
+        if channel_reasoning_config is not None:
+            return dict(channel_reasoning_config)
         return self._load_reasoning_config(model)
 
     def _set_session_reasoning_override(self, session_key: str, reasoning_config: Optional[dict]) -> None:
