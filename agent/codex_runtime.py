@@ -767,9 +767,12 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)
+        _failed_interrupt = _consume_user_interrupt(agent)
         return _turn_result(
-            _consume_user_interrupt(agent), messages, api_calls=0, completed=False, error=str(exc),
+            _failed_interrupt, messages, api_calls=0, completed=False, error=str(exc),
             final_response=f"Codex app-server turn failed: {exc}. Fall back to default runtime with `/codex-runtime auto`.",
+            turn_exit_reason=("interrupted_by_user" if _failed_interrupt[0]
+                              else "local_processing_error(codex_app_server)"),
         )
     interrupt = _consume_user_interrupt(agent, turn.interrupted)
     # Wedged client (turn deadline blown, OAuth refresh died, subprocess exited): retire it. Post-tool
@@ -786,8 +789,20 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         agent, turn, messages, original_user_message=original_user_message, should_review_memory=should_review_memory,
         final_response=reply["final_response"],
     )
+    # REL-01: the gateway's agent:end hook reports this; the default runtime's finalizer sets its own.
+    if interrupt[0]:
+        turn_exit_reason = "interrupted_by_user"
+    elif turn.interrupted:
+        turn_exit_reason = "interrupted_during_api_call"
+    elif turn.error is not None:
+        turn_exit_reason = "local_processing_error(codex_app_server)"
+    elif not str(turn.final_text or "").strip():
+        turn_exit_reason = "empty_response_exhausted"
+    else:
+        turn_exit_reason = "text_response(finish_reason=stop)"
     return _turn_result(
         interrupt, messages, api_calls=1, completed=not turn.interrupted and turn.error is None, error=turn.error,
+        turn_exit_reason=turn_exit_reason,
         # We flushed the projected rows ourselves (agent_persisted); the gateway must skip its own DB write.
         agent_persisted=True, codex_thread_id=turn.thread_id, codex_turn_id=turn.turn_id, **reply, **usage_result,
     )

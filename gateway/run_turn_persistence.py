@@ -270,9 +270,10 @@ class GatewayTurnPersistenceMixin:
 
     async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response):
         """agent:end hook, process-watcher scheduling, and watch-notification drain."""
+        from gateway.turn_exit_metadata import agent_end_metadata
         await self.hooks.emit("agent:end", {
             **hook_ctx, "response": (response or "")[:500], "model": agent_result.get("model", ""),
-            "provider": agent_result.get("provider", ""),
+            "provider": agent_result.get("provider", ""), **agent_end_metadata(agent_result),
         })
 
         # Pending process watchers (check_interval on background processes)
