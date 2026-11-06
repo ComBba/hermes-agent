@@ -1308,8 +1308,18 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         from gateway.session_authorities import active_authority
         from gateway.session_worker_construct import session_routing
         pr = session_routing(active_authority(runner), policy) if policy else runner._provider_routing
-        reasoning_config = (policy.current_reasoning_config(runner, ctx.session_key) if policy else
-            runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model))
+        applied_channel_reasoning = None
+        if policy:
+            reasoning_config = policy.current_reasoning_config(runner, ctx.session_key)
+        else:
+            from gateway.channel_reasoning import resolve_turn_reasoning
+            reasoning_config, applied_channel_reasoning = resolve_turn_reasoning(
+                runner, source=ctx.source, session_key=ctx.session_key, model=model, message=ctx.message)
+        if applied_channel_reasoning is not None:
+            logger.info("channel reasoning resolved: platform=%s chat=%s thread=%s model=%s effort=%s",
+                        getattr(ctx.source.platform, "value", ctx.source.platform),
+                        getattr(ctx.source, "chat_id", None), getattr(ctx.source, "thread_id", None),
+                        model, applied_channel_reasoning.get("effort"))
         from gateway.session_cli_turn import one_turn_reasoning
         reasoning_config = one_turn_reasoning(self, reasoning_config)  # `/model --once --reasoning X`
         runner._service_tier = (policy.current_service_tier(runner, ctx.session_key) if policy else
