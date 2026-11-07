@@ -12,6 +12,26 @@ from gateway.managed_ingress_provenance import ExecutionAdmission, execution_adm
 
 INQUIRY_TIMEOUT_SECONDS = 90.0
 
+
+async def _join_inquiry_worker(task,deadline:float)->bool:
+    if task is None:
+        return True
+    interrupted=False
+    if not task.done():
+        waiter=asyncio.create_task(asyncio.wait({task},timeout=max(0,deadline-time.monotonic())))
+        while not waiter.done():
+            try:
+                await asyncio.shield(waiter)
+            except asyncio.CancelledError:
+                interrupted=True
+        _ = waiter.result()
+    joined=task.done() and not task.cancelled()
+    if joined:
+        _ = task.exception()
+    if interrupted:
+        raise asyncio.CancelledError
+    return joined
+
 @dataclass(frozen=True, slots=True)
 class _CompletionCapability:
     execution: ExecutionAdmission
@@ -361,6 +381,8 @@ def _blocked(event,execution,reason):
 
 
 async def handle_turn(runner,event,source,session_entry,session_key,run_generation) -> str | None:
+    deadline=time.monotonic()+INQUIRY_TIMEOUT_SECONDS
+    cleanup_reserve=min(1.0,INQUIRY_TIMEOUT_SECONDS*.2)
     execution = execution_admission(event,session_id=session_entry.session_id)
     try:
         binding = _binding(runner,source,session_entry.session_id)
@@ -385,14 +407,20 @@ async def handle_turn(runner,event,source,session_entry,session_key,run_generati
             return _blocked(event,execution,'ingress_blocked')
         request = InquiryRequest(scope,role,event.text,str(event.message_id or ''),execution,
             check.provenance,reply_to_message_id=event.reply_to_message_id,internal=event.internal,
-            control=RequestControl(deadline=time.monotonic()+INQUIRY_TIMEOUT_SECONDS))
+            control=RequestControl(deadline=deadline-cleanup_reserve))
         services = _services(runner,home,section,scope.profile_id)
         task = asyncio.create_task(asyncio.to_thread(handler.handle,request,services))
+        event._managed_inquiry_worker_cleanup='unconfirmed'
         try:
             completion = await asyncio.wait_for(asyncio.shield(task),max(0,request.control.deadline-time.monotonic()))
         except TimeoutError:
             request.control.cancel()
-            completion = await asyncio.to_thread(handler.timeout,request,services)
+            if not await _join_inquiry_worker(task,deadline):
+                return _blocked(event,execution,'worker_cleanup_unconfirmed')
+            event._managed_inquiry_worker_cleanup='joined'
+            completion = task.result()
+        else:
+            event._managed_inquiry_worker_cleanup='joined'
         if completion is None:
             return (_blocked(event,execution,'selection_contract_failed')
                     if request.control.expired else None)
@@ -407,13 +435,21 @@ async def handle_turn(runner,event,source,session_entry,session_key,run_generati
     except asyncio.CancelledError:
         if request is not None:
             request.control.cancel()
+        if task is not None:
+            event._managed_inquiry_worker_cleanup=('joined' if await _join_inquiry_worker(task,deadline) else 'unconfirmed')
         raise
     except Exception:
         if request is not None:
             request.control.cancel()
+            if not await _join_inquiry_worker(task,deadline):
+                return _blocked(event,execution,'worker_cleanup_unconfirmed')
+            event._managed_inquiry_worker_cleanup='joined'
             if services is not None and handler is not None:
                 try:
-                    await asyncio.to_thread(handler.failed,request,services)
+                    failed=asyncio.create_task(asyncio.to_thread(handler.failed,request,services))
+                    if not await _join_inquiry_worker(failed,deadline):
+                        event._managed_inquiry_worker_cleanup='unconfirmed'
+                        return _blocked(event,execution,'worker_cleanup_unconfirmed')
                 except Exception:
                     pass
         return _blocked(event,execution,'handler_blocked')

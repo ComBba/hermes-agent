@@ -1,6 +1,6 @@
 import json
 import asyncio
-import io
+from http.server import BaseHTTPRequestHandler,HTTPServer
 import threading
 import time
 import hashlib
@@ -31,29 +31,31 @@ def external_io(monkeypatch):
         hold_close=False,closed=threading.Event(),release=threading.Event())
     def discover(self):
         state.discoveries += 1
-        return Discovery((TargetEvidence('http://127.0.0.1:41817',Sha256('a'*64),time.time(),
+        return Discovery((TargetEvidence(state.origin,Sha256('a'*64),time.time(),
                                          ServiceIdentity('service','fixture')),))
-    class Response:
-        def __init__(self):
-            self.code = state.status
-            self.headers = {'Content-Type':'application/json'}
-            self.stream = io.BytesIO(state.body)
-        def read1(self,size): return self.stream.read(size)
-        def close(self):
-            state.closed.set()
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            state.gets.append(state.origin+self.path)
             if state.hold_close:
-                assert state.release.wait(3),'external transport facade was not released'
-    class Opener:
-        def open(self,request,timeout):
-            assert request.full_url == 'http://127.0.0.1:41817/healthz'
-            assert request.get_method() == 'GET'
-            assert 0 < timeout <= 15
-            state.gets.append(request.full_url)
-            return Response()
+                state.closed.set()
+                assert state.release.wait(3),'loopback server fixture was not released'
+            try:
+                self.send_response(state.status)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(state.body)))
+                self.end_headers()
+                self.wfile.write(state.body);self.wfile.flush()
+            except (BrokenPipeError,ConnectionResetError):
+                pass
+        def log_message(self,format,*args):pass
     monkeypatch.setattr(MacDiscovery,'__call__',discover)
-    monkeypatch.setattr('gateway.managed_inquiry.transport.request.build_opener',lambda *args:Opener())
-    yield state
-    state.release.set()
+    with HTTPServer(('127.0.0.1',0),Handler) as server:
+        state.origin=f'http://127.0.0.1:{server.server_port}'
+        worker=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.01});worker.start()
+        try:yield state
+        finally:
+            state.release.set();server.shutdown();worker.join(2)
+            assert not worker.is_alive()
 
 
 @pytest_asyncio.fixture
@@ -177,11 +179,11 @@ async def test_healthy_probe_and_new_admission_use_actual_b_core_each_time(owner
 
 
 @pytest.mark.asyncio
-async def test_actual_timeout_then_late_healthy_probe_preserves_first_prepared_and_pending(owner,monkeypatch,external_io):
+async def test_actual_http_timeout_reaps_worker_before_native_completion(owner,monkeypatch,external_io):
     from gateway import managed_inquiry_bridge as bridge
     from gateway.managed_inquiry import probe as probe_module
     from gateway.managed_inquiry.models import State
-    monkeypatch.setattr(bridge,'INQUIRY_TIMEOUT_SECONDS',.15)
+    monkeypatch.setattr(bridge,'INQUIRY_TIMEOUT_SECONDS',.6)
     actual = probe_module.classify
     classified = []
     def observe(*args):
@@ -194,17 +196,16 @@ async def test_actual_timeout_then_late_healthy_probe_preserves_first_prepared_a
     assert await asyncio.to_thread(external_io.closed.wait,2)
     result = await asyncio.wait_for(task,2)
     runner,adapter,_authority,_,_,_,terminal = result
-    assert terminal['managed_inquiry_v1']['state']=='timed_out'
+    assert terminal['managed_inquiry_v1']['state']=='status_blocked'
+    assert terminal['managed_inquiry_v1']['detail_code']=='discovery_timeout'
     event = adapter._native_test_events[-1]
     cap = event._managed_completion_capability
+    assert event._managed_inquiry_worker_cleanup=='joined'
     assert cap.store.pending(cap.request.scope) is not None
     first = cap.store.cached(cap.request)
     external_io.release.set()
-    deadline = time.monotonic()+2
-    while State.HEALTHY not in classified and time.monotonic()<deadline:
-        await asyncio.sleep(.01)
-    assert State.HEALTHY in classified
     await asyncio.sleep(.05)
+    assert State.HEALTHY not in classified
     assert cap.store.cached(cap.request)==first
     assert cap.store.pending(cap.request.scope) is not None
     assert adapter.send.await_count==1
@@ -214,6 +215,107 @@ async def test_actual_timeout_then_late_healthy_probe_preserves_first_prepared_a
     assert followup[-1]['managed_inquiry_v1']['state']=='health_verified'
     assert len(external_io.gets)==2
     runner._hmwa_prepare_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_outer_timeout_joins_actual_worker_and_uses_single_prepared(owner,monkeypatch):
+    from gateway import managed_inquiry_bridge as bridge
+    monkeypatch.setattr(bridge,'INQUIRY_TIMEOUT_SECONDS',.6)
+    original=bridge._services
+    def services(*args):
+        actual=original(*args)
+        def probe(control):
+            report=actual.probe(control)
+            assert control.cancelled.wait(2)
+            return report
+        return replace(actual,probe=probe)
+    monkeypatch.setattr(bridge,'_services',services)
+    runner,adapter,_,_,_,_,terminal=await run_native_inquiry(owner,monkeypatch)
+    event=adapter._native_test_events[-1]
+    cap=event._managed_completion_capability
+    assert event._managed_inquiry_worker_cleanup=='joined'
+    assert terminal['managed_inquiry_v1']['state']=='timed_out'
+    assert terminal['managed_inquiry_v1']['store_verified'] is True
+    first=cap.store.cached(cap.request)
+    assert first==cap.prepared
+    assert cap.store.pending(cap.request.scope) is not None
+    await asyncio.sleep(.03)
+    assert cap.store.cached(cap.request)==first
+    with sqlite3.connect(cap.store.path) as connection:
+        assert connection.execute('SELECT COUNT(*) FROM prepared WHERE result_json IS NOT NULL').fetchone()[0]==1
+    assert adapter.send.await_count==1
+    runner._hmwa_prepare_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_outer_timeout_preserves_actual_late_worker_cas(owner,monkeypatch):
+    from gateway import managed_inquiry_bridge as bridge
+    from gateway.managed_inquiry.task_models import CompletionState
+    monkeypatch.setattr(bridge,'INQUIRY_TIMEOUT_SECONDS',.6)
+    original=bridge._services
+    entered=threading.Event()
+    release=threading.Event()
+    captured=[]
+    def services(*args):
+        actual=original(*args)
+        def probe(control):
+            report=actual.probe(control)
+            entered.set()
+            assert release.wait(3)
+            return report
+        wrapped=replace(actual,probe=probe)
+        captured.append(wrapped)
+        return wrapped
+    monkeypatch.setattr(bridge,'_services',services)
+    try:
+        task=asyncio.create_task(run_native_inquiry(owner,monkeypatch))
+        assert await asyncio.to_thread(entered.wait,2)
+        result=await asyncio.wait_for(task,2)
+        runner,adapter,_authority,_,receipt,_,terminal=result
+        event=adapter._native_test_events[-1]
+        assert terminal['managed_inquiry_v1']['state']=='worker_cleanup_unconfirmed'
+        assert terminal['managed_inquiry_v1']['store_verified'] is False
+        assert event._managed_inquiry_worker_cleanup=='unconfirmed'
+        release.set()
+        store=captured[0].state
+        deadline=time.monotonic()+2
+        prepared=None
+        while time.monotonic()<deadline:
+            with sqlite3.connect(store.path) as connection:
+                row=connection.execute('SELECT result_json FROM prepared WHERE admission_id=?',(receipt.admission_id,)).fetchone()
+            if row and row[0]:
+                from gateway.managed_inquiry.task_codec import decode_completion
+                prepared=decode_completion(row[0])
+                break
+            await asyncio.sleep(.01)
+        assert prepared is not None and prepared.state==CompletionState.TIMED_OUT
+        with sqlite3.connect(store.path) as connection:
+            assert connection.execute('SELECT COUNT(*) FROM roots WHERE active=1').fetchone()[0]==1
+            assert connection.execute('SELECT COUNT(*) FROM prepared WHERE result_json IS NOT NULL').fetchone()[0]==1
+        assert adapter.send.await_count==1
+        runner._hmwa_prepare_turn.assert_not_called()
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_join_defers_cancellation_until_actual_worker_exits():
+    from gateway.managed_inquiry_bridge import _join_inquiry_worker
+    release=threading.Event()
+    exited=threading.Event()
+    def work():
+        release.wait(2)
+        exited.set()
+    worker=asyncio.create_task(asyncio.to_thread(work))
+    join=asyncio.create_task(_join_inquiry_worker(worker,time.monotonic()+1))
+    await asyncio.sleep(.02)
+    join.cancel()
+    await asyncio.sleep(.02)
+    assert not join.done() and not exited.is_set()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await join
+    assert exited.is_set() and worker.done()
 
 
 def test_failed_send_restarts_in_fresh_process_and_real_ack_links_reply(tmp_path):
