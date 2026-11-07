@@ -386,16 +386,21 @@ def _build_scale_note(scale_info: Optional[dict], crop_offset: Optional[dict]) -
         ow, oh = scale_info["orig_width"], scale_info["orig_height"]
         nw, nh = scale_info["new_width"], scale_info["new_height"]
         fx, fy = (ow / nw if nw else 1.0), (oh / nh if nh else 1.0)
-        axes = (f"any coordinates you report by {fx:.2f}" if f"{fx:.2f}" == f"{fy:.2f}"
-                else f"any x coordinates you report by {fx:.2f} and any y coordinates by {fy:.2f}")
-        parts.append(f"Image downscaled from {ow}x{oh} to {nw}x{nh} for vision; "
+        upscaled = nw > ow or nh > oh
+        # downscale keeps its 2-decimal contract; an upscale factor can be tiny (1px -> 1280px = 0.00078125)
+        fmt = (lambda v: f"{v:.6g}") if upscaled else (lambda v: f"{v:.2f}")
+        axes = (f"any coordinates you report by {fmt(fx)}" if fmt(fx) == fmt(fy)
+                else f"any x coordinates you report by {fmt(fx)} and any y coordinates by {fmt(fy)}")
+        verb = "upscaled" if upscaled else "downscaled"
+        parts.append(f"Image {verb} from {ow}x{oh} to {nw}x{nh} for vision; "
                      f"multiply {axes} to map back to the original image.")
     if crop_offset:
         parts.append(
             f"Analysis was performed on a cropped region of the original "
             f"image starting at offset ({crop_offset['x']}, "
             f"{crop_offset['y']}); coordinates are relative to that crop "
-            f"origin — add the offset to map back to the full image.")
+            f"origin — {'apply the scaling above first, then ' if scale_info else ''}"
+            f"add the offset to map back to the full image.")
     return " ".join(parts) if parts else None
 
 
@@ -593,7 +598,7 @@ def _should_use_native_vision_fast_path() -> bool:
 
 def _build_native_vision_tool_result(
     image_url: str, question: str, image_data_url: str, image_size_bytes: int,
-    scale_note: Optional[str] = None,
+    scale_note: Optional[str] = None, identifier_hint: bool = False, ocr_hint: Optional[str] = None,
 ) -> dict[str, Any]:
     """Multimodal tool-result envelope. The text part is intentionally minimal (the model already
     has the question); ``text_summary`` is the fallback for providers without multimodal tool results."""
@@ -604,6 +609,12 @@ def _build_native_vision_tool_result(
         text_part += f"\n\nQuestion: {question.strip()}"
     if scale_note:
         text_part += f"\n\nNote: {scale_note}"
+    if identifier_hint:
+        from agent.image_routing import IDENTIFIER_UNCERTAINTY_HINT
+
+        text_part += f"\n{IDENTIFIER_UNCERTAINTY_HINT}"
+    if ocr_hint:
+        text_part += f"\n{ocr_hint}"
     return {
         "_multimodal": True,
         "content": [
@@ -735,12 +746,25 @@ async def _vision_analyze_native(
             # Reject rather than embed a session-wedging payload.
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 return tool_error(_too_large_message(image_data_url), success=False)
+        else:  # opt-in vision.min_long_edge: upscale small images (or crops) so fine glyphs stay legible
+            from agent.image_routing import upscale_small_image
+
+            mime = image_data_url[5:image_data_url.index(";")]
+            raw, new_mime, upscaled = upscale_small_image(prepared.path.read_bytes(), mime)
+            if upscaled:
+                image_data_url = f"data:{new_mime};base64,{base64.b64encode(raw).decode('ascii')}"
+                _scale_info = upscaled  # scale note: map back by the factor first, then add any crop offset
         embedded = True
         if not reserved:
             _record_embed(image_url)
+        from agent.image_routing import ocr_crosscheck_hint
+
         return _build_native_vision_tool_result(
             image_url=image_url, question=question, image_data_url=image_data_url,
             image_size_bytes=prepared.size_bytes,
+            ocr_hint=ocr_crosscheck_hint(prepared.path.read_bytes()),  # opt-in vision.ocr_command only
+            identifier_hint=bool(_scale_info) and (_scale_info["new_width"] > _scale_info["orig_width"]
+                                                   or _scale_info["new_height"] > _scale_info["orig_height"]),
             scale_note=_build_scale_note(_scale_info or None, prepared.crop_offset or None))
     except Exception as exc:
         logger.warning("Native vision fast path failed: %s", exc)

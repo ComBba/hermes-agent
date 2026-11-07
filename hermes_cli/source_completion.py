@@ -48,6 +48,8 @@ def complete_source_checkout(
     recorded on the open update receipt and appended to ``followups`` as ``(step, reason)``.
     Returns True only when every step finished and the SQLite runtime is not unsafe.
     """
+    from hermes_cli.managed_release import require_unmanaged_update
+    require_unmanaged_update(root, 'source_completion')
     from hermes_cli.update_lock import UpdateLock, describe_holder
 
     root = Path(root)
@@ -94,6 +96,8 @@ def _complete_locked(
     before_build=None,
 ) -> bool:
     """The completion body; callers hold the update lock already."""
+    from hermes_cli.managed_release import require_unmanaged_update
+    require_unmanaged_update(root, 'source_completion_locked')
     from hermes_cli.source_build import build_update_products
     from hermes_cli.update_cmd_maint import _run_post_update_maintenance
     from hermes_cli.venv_sync import publish_launchers
@@ -174,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
                              "same launchers/products/maintenance with update wording.")
     args = parser.parse_args([argument for argument in argv if argument != _PREPARED])
     root = args.source.resolve()
+    from hermes_cli.managed_release import require_unmanaged_update
+    require_unmanaged_update(root, 'source_completion_entry')
     if not (root / "hermes_cli/source_completion.py").is_file():
         print(f"✗ {root} is not a Hermes source checkout", file=sys.stderr)
         return 1

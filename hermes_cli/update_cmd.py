@@ -1809,6 +1809,8 @@ def _update_run_channel(args) -> str:
 
 def _cmd_update_impl(args, gateway_mode: bool):
     """Apply the update; the command boundary owns errors, receipts and stdio."""
+    from hermes_cli.managed_release import require_unmanaged_update
+    require_unmanaged_update(_m().PROJECT_ROOT, 'update')
     # Marks this frame as the CURRENT updater for
     # _old_updater.in_historical_update(); historical on-disk updaters do not
     # declare this local, so only they hand off through retired shims.

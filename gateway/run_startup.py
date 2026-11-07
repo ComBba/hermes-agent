@@ -78,6 +78,12 @@ def _own_policy_envs(platform) -> Optional[tuple]:
 
 class GatewayStartupMixin:
     """Startup sequence, resume/restore and handoff methods for GatewayRunner."""
+    _managed_deferred_boot_sends: bool = False
+    _managed_boot_sends_held: bool = False
+    _managed_startup_recovery_held: bool = False
+    _managed_finish_wiring_held: int | None = None
+    _managed_deferred_delivery_platforms: set[tuple[str, str | None]] | None = None
+    _managed_hold_recovery_lock: asyncio.Lock | None = None
 
     @staticmethod
     def _log_agent_budget() -> None:
@@ -314,10 +320,20 @@ class GatewayStartupMixin:
         ``_send_restart_notification`` and ``_redeliver_pending_obligations`` used to be awaited inline
         *before* ``_finish_startup_restore`` released the gate. See #91969.
         """
+        if getattr(self, '_external_drain_active', False):
+            self._managed_deferred_boot_sends = (getattr(self, '_managed_deferred_boot_sends', False)
+                                                 or planned_restart_notification_pending)
+            self._managed_boot_sends_held = True
+            return
         from gateway.run import _startup_restore_drain_timeout_secs
         claimed = await self._claim_pending_obligations()
 
         async def _boot_sends() -> None:
+            if getattr(self, '_external_drain_active', False):
+                self._managed_deferred_boot_sends = planned_restart_notification_pending
+                self._managed_boot_sends_held = True
+                await self._redeliver_claimed_obligations(claimed)
+                return
             await self._send_restart_notification()
             if planned_restart_notification_pending:
                 await self._replay_pending_planned_restart_notification()
@@ -478,6 +494,17 @@ class GatewayStartupMixin:
             return 0
         redelivered = 0
         for row in claimed:
+            if getattr(self, '_external_drain_active', False):
+                deferred = getattr(self, '_managed_deferred_delivery_platforms', None)
+                if deferred is None:
+                    deferred = self._managed_deferred_delivery_platforms = set()
+                deferred.add((row['platform'], row.get('profile')))
+                from gateway.delivery_ledger import is_flood_error
+                error = row.get('last_error')
+                await self._release_runtime_claim_quiet(row['obligation_id'],
+                    'failed to defer held delivery claim %s',
+                    error=error if is_flood_error(error) else 'send_path_degraded')
+                continue
             if row.get("adopted"):
                 # Adopted at boot inside its flood wait: its resume flag is cleared with the others, and
                 # the timer armed below sends it once the platform's deadline has passed.
@@ -497,6 +524,8 @@ class GatewayStartupMixin:
             with _log_suppressed(logging.DEBUG, "delivery ledger update failed", exc_info=True):
                 if result is not None and getattr(result, "success", False):
                     await asyncio.to_thread(mark_delivered, row["obligation_id"])
+                    from gateway.managed_inquiry_bridge import record_replayed_delivery
+                    await asyncio.to_thread(record_replayed_delivery, self, row, content, result)
                     redelivered += 1
                     logger.info(
                         "Redelivered recovered final response to %s:%s (obligation %s, attempt %d)",
@@ -543,6 +572,9 @@ class GatewayStartupMixin:
     async def _redeliver_pending_obligations(self) -> int:
         """Claim + redeliver in one call. Stable shape for tests/external callers; the startup path
         calls the halves separately so the DB half runs inline before the abandonable send task."""
+        if getattr(self, '_external_drain_active', False):
+            self._managed_boot_sends_held = True
+            return 0
         return await self._redeliver_claimed_obligations(await self._claim_pending_obligations())
 
     async def _redeliver_failed_obligations_for_platform(
@@ -551,6 +583,12 @@ class GatewayStartupMixin:
         """Replay one adapter identity's transient failures after reconnect: the startup sweep cannot
         claim live-owner rows, so ``send_path_degraded`` responses would otherwise stay failed until
         the next restart. Best-effort; reuses the startup redelivery contract."""
+        if getattr(self, '_external_drain_active', False):
+            deferred = getattr(self, '_managed_deferred_delivery_platforms', None)
+            if deferred is None:
+                deferred = self._managed_deferred_delivery_platforms = set()
+            deferred.add((platform.value, profile))
+            return 0
         try:
             from gateway.delivery_ledger import ledger_enabled, sweep_failed_for_runtime
             if not await asyncio.to_thread(ledger_enabled):
@@ -573,6 +611,44 @@ class GatewayStartupMixin:
                     error=row.get("last_error") or "send_path_degraded",
                 )
         return await self._redeliver_claimed_obligations(sendable)
+
+    async def _resume_external_hold_recovery(self) -> None:
+        lock = self._managed_hold_recovery_lock
+        if lock is None:
+            lock = self._managed_hold_recovery_lock = asyncio.Lock()
+        async with lock:
+            await self._resume_external_hold_recovery_locked()
+
+    async def _resume_external_hold_recovery_locked(self) -> None:
+        if (getattr(self, '_external_drain_active', False) or getattr(self, '_draining', False)
+                or not getattr(self, '_running', False)):
+            return
+        if getattr(self, '_managed_startup_recovery_held', False):
+            await self._start_recover_previous_work()
+            self._managed_startup_recovery_held = False
+        connected = getattr(self, '_managed_finish_wiring_held', None)
+        if connected is not None:
+            self._managed_finish_wiring_held = None
+            self._managed_boot_sends_held = False
+            self._managed_deferred_boot_sends = False
+            await self._start_finish_wiring(connected)
+        if getattr(self, '_external_drain_active', False):
+            return
+        if getattr(self, '_managed_boot_sends_held', False):
+            planned = getattr(self, '_managed_deferred_boot_sends', False)
+            self._managed_boot_sends_held = False
+            self._managed_deferred_boot_sends = False
+            await self._await_startup_boot_sends(planned_restart_notification_pending=planned)
+        deferred = getattr(self, '_managed_deferred_delivery_platforms', None) or set()
+        self._managed_deferred_delivery_platforms = set()
+        for platform, profile in deferred:
+            await self._redeliver_failed_obligations_for_platform(Platform(platform), profile=profile)
+        self._schedule_resume_pending_sessions()
+        from gateway.session_authorities import serving_authorities
+        from gateway.session_contract import SessionRef
+        for authority in serving_authorities(self):
+            for session_id in list(authority.sessions):
+                authority._schedule(SessionRef(authority.profile_id, session_id))
 
     def _resume_pending_candidates(self, platform=None) -> Optional[list]:
         """Snapshot resume-pending entries (optionally scoped to ``platform``); None when
@@ -623,6 +699,8 @@ class GatewayStartupMixin:
         ``_is_resume_pending`` injection path owns the wording). Sessions whose adapter is offline stay
         ``resume_pending`` for the reconnect watcher, which re-calls this scoped to that ``platform``;
         sessions with a running agent are skipped so none is resumed twice."""
+        if getattr(self, '_external_drain_active', False):
+            return 0
         from gateway.run import (
             _AGENT_PENDING_SENTINEL, _auto_continue_freshness_window, _is_fresh_gateway_interruption,
         )
@@ -1207,7 +1285,6 @@ class GatewayStartupMixin:
 
     async def _start_recover_previous_run(self) -> None:
         """Plugins, relay, hooks, then crash/clean-exit recovery of processes and sessions."""
-        from gateway.run import _hermes_home
         self._start_register_plugins_relay_hooks()
         self._start_relay_provision_retry()
         # Plugins that load later (force re-discovery, install/enable nudge) re-wire live adapters (#87770).
@@ -1215,6 +1292,13 @@ class GatewayStartupMixin:
             from hermes_cli.plugins import get_plugin_manager
             self._subscribe_plugin_rewire(get_plugin_manager())
         self.hooks.discover_and_load()
+        if getattr(self, '_external_drain_active', False):
+            self._managed_startup_recovery_held = True
+            return
+        await self._start_recover_previous_work()
+
+    async def _start_recover_previous_work(self) -> None:
+        from gateway.run import _hermes_home
         # Recover background processes from checkpoint (crash recovery). ``_checkpoint_path`` is
         # scope-relative, so a served secondary's turn wrote ITS home's processes.json; recover each
         # served profile's file under its scope or those processes are never re-adopted.
@@ -1593,6 +1677,11 @@ class GatewayStartupMixin:
 
     async def _start_finish_wiring(self, connected_count: int) -> None:
         """Post-connect wiring: services, boot notifications, startup restore, recovered watchers."""
+        from gateway.managed_inquiry_bridge import prepare_services
+        prepare_services(self)
+        if getattr(self, '_external_drain_active', False):
+            self._managed_finish_wiring_held = connected_count
+            return
         from gateway.run import _planned_restart_notification_pending, _restart_notification_pending
         from gateway.shutdown_flush import recover_gateway_pending
         await self._start_post_connect_services(connected_count)
@@ -1704,6 +1793,8 @@ class GatewayStartupMixin:
             await self._start_flush_runtime_status()
 
     async def _start_impl(self) -> bool:
+        from gateway.drain_control import latch_external_hold
+        latch_external_hold(self)
         logger.info("Starting Hermes Gateway...")
         self._start_install_faulthandler()
         await self._start_log_startup_environment()
@@ -1757,8 +1848,10 @@ class GatewayStartupMixin:
         # A boot that could not start every configured platform is not a normal run: stamp ``degraded``
         # so ``gateway status`` / /api/status / the health snapshot surface it, instead of only a log
         # line next to "Gateway running with N platform(s)".
-        self._update_runtime_status(self._serving_state())
+        self._update_runtime_status('draining' if self._external_drain_active else self._serving_state())
         await self._start_finish_wiring(connected_count)
+        from gateway.managed_loaded_receipt import seal_loaded_receipt
+        seal_loaded_receipt(self)
         self._start_spawn_background_watchers()
         from hermes_cli.observability.shared_metrics_startup import record_process_ready
         record_process_ready("gateway_boot", background=True)

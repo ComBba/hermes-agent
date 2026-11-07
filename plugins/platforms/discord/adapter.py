@@ -5135,18 +5135,19 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         channel_id = getattr(channel, "id", None)
         if channel_id is not None:
             keys.add(str(channel_id))
-        channel_name = str(getattr(channel, "name", "")).strip()
-        if channel_name:
-            keys.add(channel_name)
-            keys.add(f"#{channel_name}")
+        # Numeric allowlist entries are snowflake IDs and must match only real ID fields: a
+        # user-chosen name such as "1528...", or "#1528...", is never a name key.
+        def _name_keys(name: str) -> set[str]:
+            if not name or name.lstrip("#").isdigit():
+                return set()
+            return {name, f"#{name}"}
+
+        keys |= _name_keys(str(getattr(channel, "name", "")).strip())
         parent_id = parent_channel_id or getattr(channel, "parent_id", None)
         if parent_id:
             keys.add(str(parent_id))
         parent_channel = getattr(channel, "parent", None)
-        parent_name = str(getattr(parent_channel, "name", "")).strip() if parent_channel else ""
-        if parent_name:
-            keys.add(parent_name)
-            keys.add(f"#{parent_name}")
+        keys |= _name_keys(str(getattr(parent_channel, "name", "")).strip() if parent_channel else "")
         return keys
 
     def _discord_thread_require_mention(self) -> bool:
@@ -5968,7 +5969,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             print(f"[Discord] Failed to cache {kind} attachment: {e}", flush=True)
             return att.url
 
-    async def _collect_attachment_media(self, all_attachments: list) -> tuple:
+    async def _collect_attachment_media(self, all_attachments: list, *, observations=None) -> tuple:
         """Cache every attachment and return ``(media_urls, media_types, media_text_inlined,
         pending_text_injection)``; ``media_text_inlined[i]`` is True only when attachment ``i``'s
         text was injected."""
@@ -5976,13 +5977,21 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         media_types = []
         media_text_inlined: list = []
         pending_text_injection: Optional[str] = None
-        for att in all_attachments:
+        from gateway.managed_ingress_provenance import AttachmentInput, observe_attachment
+        for supplied in all_attachments:
+            bound = supplied if isinstance(supplied, AttachmentInput) else None
+            att = bound.attachment if bound is not None else supplied
             content_type = att.content_type or "unknown"
             if content_type.startswith("image/"):
-                media_urls.append(await self._cache_simple_media(
-                    att, content_type, "image", {".jpg", ".jpeg", ".png", ".gif", ".webp"}, ".jpg"))
+                cached_path = await self._cache_simple_media(
+                    att, content_type, "image", {".jpg", ".jpeg", ".png", ".gif", ".webp"}, ".jpg")
+                media_urls.append(cached_path)
                 media_types.append(content_type)
                 media_text_inlined.append(False)
+                if bound is not None and observations is not None:
+                    observation = observe_attachment(bound, cached_path, content_type)
+                    if observation is not None:
+                        observations.append(observation)
             elif content_type.startswith("audio/"):
                 media_urls.append(await self._cache_simple_media(
                     att, content_type, "audio", {".ogg", ".mp3", ".wav", ".webm", ".m4a"}, ".ogg"))
@@ -6090,6 +6099,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             parent_channel_id = self._get_parent_channel_id(message.channel)
         is_voice_linked_channel = False
         # Save stripped text now: create_thread() can clobber message.content (breaks /command detection).
+        raw_caption_present = bool(message.content)
         raw_content = message.content.strip()
         normalized_content = raw_content
         mention_prefix = False
@@ -6229,8 +6239,16 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 or self._derive_auto_thread_name(message.content or "")
             ) if auto_threaded_channel is not None else None,
         )
+        from gateway.managed_ingress_provenance import AttachmentInput, PlatformObservation
+        attachment_observations = []
+        bound_attachments = [
+            *(AttachmentInput(att, 'current', str(message.id)) for att in message.attachments),
+            *(AttachmentInput(att, 'snapshot', str(getattr(message.reference, 'message_id', '') or ''))
+              for att in snapshot_attachments),
+            *(AttachmentInput(att, 'reply', str(message.reference.message_id)) for att in referenced_attachments),
+        ]
         media_urls, media_types, media_text_inlined, pending_text_injection = await self._collect_attachment_media(
-            all_attachments)
+            bound_attachments, observations=attachment_observations)
         event_text = normalized_content
         if pending_text_injection:
             event_text = f"{pending_text_injection}\n\n{event_text}" if event_text else pending_text_injection
@@ -6282,6 +6300,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             timestamp=message.created_at, auto_skill=_skills, channel_prompt=_channel_prompt,
             channel_context=_channel_context,
         )
+        event._managed_platform_observation = PlatformObservation(
+            raw_caption_present, str(message.id), str(message.author.id), tuple(attachment_observations), reply_to_id)
         if (
             getattr(getattr(message, "author", None), "bot", False)
             and self._is_bot_tag_debounce_continuation(message)
