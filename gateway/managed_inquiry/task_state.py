@@ -136,6 +136,7 @@ class PendingStore:
                 task = self._task(row)
                 if selection.source is not None:
                     task = replace(task, source=selection.source)
+                    connection.execute("UPDATE roots SET source_json=? WHERE scope_key=?", (encode_link(task.source), request.scope.key))
             token = uuid.uuid4().hex
             connection.execute("INSERT INTO prepared(admission_id,scope_key,request_sha256,token,request_binding_json,source_json,created_at) VALUES(?,?,?,?,?,?,?)", (execution.admission_id, request.scope.key, request.identity_sha256, token, encode_binding(delivery_binding(request)), encode_link(task.source), time.time()))
             return WorkClaim(request, task, token)
