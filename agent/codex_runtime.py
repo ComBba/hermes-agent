@@ -757,9 +757,11 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         raise _checkpoint_blocked("codex_app_server owns the authoritative thread and compacts it "
                                   "without a truthful pre-compaction transcript boundary")
     _ensure_codex_session(agent, messages)
+    api_calls = 0
     try:
         _start_codex_thread(agent)
         wire_model = _codex_wire_model(agent, getattr(agent, "_codex_session_model_provider", None))
+        api_calls = 1
         turn = agent._codex_session.run_turn(
             user_input=user_message,
             model=wire_model, reasoning_effort=_codex_turn_effort(agent, wire_model),
@@ -767,9 +769,12 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)
+        _failed_interrupt = _consume_user_interrupt(agent)
         return _turn_result(
-            _consume_user_interrupt(agent), messages, api_calls=0, completed=False, error=str(exc),
+            _failed_interrupt, messages, api_calls=api_calls, completed=False, error=str(exc),
             final_response=f"Codex app-server turn failed: {exc}. Fall back to default runtime with `/codex-runtime auto`.",
+            turn_exit_reason=("interrupted_by_user" if _failed_interrupt[0]
+                              else "local_processing_error(codex_app_server)"),
         )
     interrupt = _consume_user_interrupt(agent, turn.interrupted)
     # Wedged client (turn deadline blown, OAuth refresh died, subprocess exited): retire it. Post-tool
@@ -786,8 +791,20 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         agent, turn, messages, original_user_message=original_user_message, should_review_memory=should_review_memory,
         final_response=reply["final_response"],
     )
+    # REL-01: the gateway's agent:end hook reports this; the default runtime's finalizer sets its own.
+    if interrupt[0]:
+        turn_exit_reason = "interrupted_by_user"
+    elif turn.interrupted:
+        turn_exit_reason = "interrupted_during_api_call"
+    elif turn.error is not None:
+        turn_exit_reason = "local_processing_error(codex_app_server)"
+    elif not str(turn.final_text or "").strip():
+        turn_exit_reason = "empty_response_exhausted"
+    else:
+        turn_exit_reason = "text_response(finish_reason=stop)"
     return _turn_result(
         interrupt, messages, api_calls=1, completed=not turn.interrupted and turn.error is None, error=turn.error,
+        turn_exit_reason=turn_exit_reason,
         # We flushed the projected rows ourselves (agent_persisted); the gateway must skip its own DB write.
         agent_persisted=True, codex_thread_id=turn.thread_id, codex_turn_id=turn.turn_id, **reply, **usage_result,
     )
@@ -799,6 +816,7 @@ def _turn_result(interrupt: tuple[bool, Any], messages: list[dict[str, Any]], *,
     user_interrupted, interrupt_message = interrupt
     return {
         "final_response": final_response, "messages": messages, "api_calls": api_calls,
+        "api_call_observation": {"kind": "codex_turn_attempt", "count": api_calls},
         "completed": completed, "partial": not completed, "interrupted": user_interrupted,
         **({"interrupt_message": interrupt_message} if interrupt_message else {}),
         "error": error, **extra,

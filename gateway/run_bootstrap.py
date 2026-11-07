@@ -288,7 +288,7 @@ async def _start_gateway_start_control_socket(runner):
         from gateway.run_plugin_rewire import reload_plugins_verb
         from gateway.run_active_work_verb import active_work_verb
         from gateway.relay.link import relay_link_verb
-        from gateway.drain_control import RESTART_WAIT_REASON
+        from gateway.drain_control import RESTART_WAIT_REASON, EXTERNAL_HOLD_REASON
         descriptor = runner.session_runtime_descriptor
 
         def _identify_runtime():
@@ -302,6 +302,8 @@ async def _start_gateway_start_control_socket(runner):
                 # parked approval/clarify (#139041), so the endpoint stays dialable until stop().
                 if descriptor.get('drain_reason') != RESTART_WAIT_REASON:
                     payload['capabilities'] = []
+            elif getattr(runner, '_external_drain_active', False) and getattr(runner, '_running', False):
+                payload.update(state='draining', drain_reason=EXTERNAL_HOLD_REASON)
             if payload.get('state') == 'draining' and descriptor.get('drain_reason'):
                 payload['drain_reason'] = descriptor['drain_reason']
             payload["supervisor"] = {"manual": "none", "desktop": "none"}.get(
@@ -352,9 +354,11 @@ async def _start_gateway_start_control_socket(runner):
                 result = {"pending": True, "served_profiles": runner.served_profile_names()}
             return {"multiplex": bool(getattr(runner.config, "multiplex_profiles", False)), **result}
 
+        from gateway.managed_loaded_receipt import loaded_receipt
         _control_server = GatewayControlServer(
             verb_handlers={"pause-for-update": _pause_for_update_handler, "identify": _identify_runtime,
                            "rescan-profiles": _rescan_profiles_handler,
+                           "managed-loaded-receipt": lambda: loaded_receipt(runner),
                            "migrate-profile-identity": migrate_profile_identity_verb(runner),
                            "unserve-profile": unserve_profile_verb(runner),
                            "serve-profile": serve_profile_verb(runner),

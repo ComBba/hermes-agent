@@ -31,6 +31,7 @@ _log = logging.getLogger(__name__)
 # runs its in-flight turns, so a client may attach to answer a parked approval/clarify; new input is
 # committed queued for the next owner and never claimed here. ``stop()`` withdraws it.
 RESTART_WAIT_REASON = "restart_wait"
+EXTERNAL_HOLD_REASON = 'external_hold'
 
 
 def open_restart_wait(runner) -> None:
@@ -61,7 +62,7 @@ _RESTART_WAIT_READS = re.compile(
 def restart_wait_read(runner, method, path) -> bool:
     """True for an allowlisted read request while *runner* is in a restart's after-turn wait."""
     return (method == "GET" and bool(_RESTART_WAIT_READS.fullmatch(path or ""))
-            and restart_wait_open(runner))
+            and interactive_hold_open(runner))
 
 
 def restart_wait_socket_ticket(runner, method, path, query) -> bool:
@@ -71,7 +72,7 @@ def restart_wait_socket_ticket(runner, method, path, query) -> bool:
     from urllib.parse import parse_qs
     from hermes_cli.web_session_sockets import GATEWAY_SOCKET
     return (method == "POST" and path == "/api/webapp/socket-ticket"
-            and parse_qs(query or "").get("socket") == [GATEWAY_SOCKET] and restart_wait_open(runner))
+            and parse_qs(query or "").get("socket") == [GATEWAY_SOCKET] and interactive_hold_open(runner))
 
 # The WebSocket verbs an interactive client may still call during that wait: attach to and read the
 # parked session, answer its prompt (or interrupt the turn so the restart can finish) and commit
@@ -87,7 +88,19 @@ RESTART_WAIT_WS_METHODS = frozenset({
 
 def ws_method_refused_while_draining(runner, method) -> bool:
     """True when an interactive WebSocket verb must be refused because *runner* is draining."""
+    if getattr(runner, '_external_drain_active', False):
+        return method not in RESTART_WAIT_WS_METHODS - {'prompt.submit'}
     return bool(getattr(runner, "_draining", False)) and method not in RESTART_WAIT_WS_METHODS
+
+
+def interactive_hold_open(runner) -> bool:
+    return restart_wait_open(runner) or (
+        bool(getattr(runner, '_external_drain_active', False)) and bool(getattr(runner, '_running', False)))
+
+
+def latch_external_hold(runner) -> None:
+    from hermes_constants import get_process_hermes_home
+    runner._external_drain_active = drain_requested(home=get_process_hermes_home())
 
 _DRAIN_REQUEST_FILENAME = ".drain_request.json"
 # Drain-gated lifecycle actions complete in minutes; an hour bounds the wedge a leaked

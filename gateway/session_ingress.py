@@ -122,6 +122,8 @@ async def _hand_over_turn_marker(authority, admission_id, event):
     no-waiter reply keeps it until ``deliver_settled``; any other turn releases it here."""
     adopter = _marker_adopters(authority).get(admission_id)
     if adopter is not None:
+        from gateway.managed_inquiry_bridge import handoff_managed_completion
+        handoff_managed_completion(authority, admission_id, event, adopter)
         _move_marker(event, adopter)
         return
     if admission_id in authority.pending_deliveries:
@@ -297,6 +299,8 @@ async def execute_admission(authority, ref, row):
     authority.native_waiters.discard(row['admission_id'])
     if 'native_text_v1' in row['payload']:
         event = restore_native(row['payload'], authority.runner)
+        from gateway.managed_ingress_provenance import AdmissionOwner, bind_admission
+        bind_admission(event, row, AdmissionOwner(authority.profile_id, ref.session_id, authority.epoch))
     else:
         from gateway.session_ingress_media import restore_attachments
         event = MessageEvent(text=row['payload']['text'], source=live.source,
@@ -514,6 +518,8 @@ async def dispatch_shared_busy(adapter, event, session_key, *, durable=False):
         event._turn_marker_handoff = getattr(adapter, 'gateway_runner', None) is not None
         try:
             response = await adapter._message_handler(event)
+            from gateway.managed_inquiry_bridge import transfer_managed_delivery
+            transfer_managed_delivery(event, delivery_event, response)
             # The ledgered send releases the marker off the event it sends.
             _move_marker(event, delivery_event)
             delivery_event._turn_marker_handoff = event._turn_marker_handoff

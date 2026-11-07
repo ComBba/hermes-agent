@@ -2347,6 +2347,9 @@ from hermes_cli.update_receipt import update_receipt_scope
 @update_receipt_scope()
 def cmd_update(args):
     """Update Hermes Agent: hangup protection + update lock around ``_cmd_update_impl``."""
+    if not getattr(args, 'check', False):
+        from hermes_cli.managed_release import require_unmanaged_update
+        require_unmanaged_update(PROJECT_ROOT, 'update')
     # Marks this frame as the CURRENT updater for
     # _old_updater.in_historical_update(); historical on-disk updaters do not
     # declare this local, so only they hand off through retired shims.

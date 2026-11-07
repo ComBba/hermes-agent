@@ -192,6 +192,12 @@ def ingress_fingerprint(payload, raw=None):
     envelope.pop('ingress_sha256', None)
     if 'media' in envelope:
         envelope['media'] = [[media['sha256'], media['size']] for media in envelope['media']]
+    if 'platform_ingress_v1' in envelope:
+        observation = envelope['platform_ingress_v1']
+        envelope['platform_ingress_v1'] = {
+            **observation, 'attachments': [{key: value for key, value in item.items()
+                                           if key != 'local_path'}
+                                          for item in observation['attachments']]}
     received = {**payload, 'native_text_v1': envelope}
     if raw is not None:
         received = {'payload': received, 'raw_message': raw}
@@ -223,6 +229,14 @@ def reconcile_native_retry(db, *, principal_id, session_id, request_id, payload,
                 (r['sha256'], r['size']) for r in fresh]:
             return payload
         resolved = {**payload, 'native_text_v1': {**payload['native_text_v1'], 'media': committed}}
+        observation = payload['native_text_v1'].get('platform_ingress_v1')
+        if observation is not None:
+            references = {fresh_ref['path']: kept_ref for fresh_ref, kept_ref in zip(fresh, committed)}
+            resolved['native_text_v1']['platform_ingress_v1'] = {
+                **observation,
+                'attachments': [{**item, 'local_path': references[item['local_path']]['path']}
+                                for item in observation['attachments']],
+            }
     committed = resolved['native_text_v1'].get('media', [])
     if committed and row[0] != 'terminal':
         # A live row still executes these bytes, so they must verify (a terminal one is digest evidence).

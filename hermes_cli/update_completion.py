@@ -63,6 +63,8 @@ def _bind_and_resume(proc: subprocess.Popen, request: dict, request_path: Path) 
 def run_completion(request: dict) -> dict:
     """Wait for new code; zero exit without a correlated terminal result fails closed."""
     root = Path(request["source"])
+    from hermes_cli.managed_release import require_unmanaged_update
+    require_unmanaged_update(root, 'run_completion')
     # The child below runs in a new session without a controlling terminal, so
     # this is the last point where sudo can ask for a password. Run the new
     # tree's pre-install as its own process (this parent stays stdlib-only); a
@@ -319,6 +321,8 @@ def _settle_after_commit(request: dict, result_path: Path, step: str, reason: st
 
 
 def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
+    from hermes_cli.managed_release import require_unmanaged_update
+    require_unmanaged_update(Path(request["source"]), 'prepare_completion')
     import pm
     from pm import receipt
     from pm.client import ensure_tools_for_sync
@@ -384,6 +388,8 @@ def _complete_selected(request: dict) -> bool:
     Returns False only when the user's local changes were left parked in the stash: nothing
     retries that, so the run is ``partial`` and exits 1 (#122557), never "Update complete".
     """
+    from hermes_cli.managed_release import require_unmanaged_update
+    require_unmanaged_update(Path(request["source"]), 'complete_selected')
     from hermes_cli import main, update_cmd, update_cmd_config
     from hermes_cli.source_completion import complete_source_checkout
     from hermes_cli.update_inventory import RuntimeRecord, UpdatePlan
@@ -554,6 +560,8 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     if root != Path(request["source"]).resolve():
         raise ValueError("completion checkout does not match request")
+    from hermes_cli.managed_release import require_unmanaged_update
+    require_unmanaged_update(root, 'completion_entry')
     # -I deliberately ignores inherited PYTHONPATH during PM preparation.
     sys.path.insert(0, str(root))
     sys.stdout = _ForwardedOutput(sys.stdout, request.get("stdout_isatty", False))
@@ -568,6 +576,8 @@ def main() -> int:
 
 def _bootstrap(request: dict, request_path: Path, result_path: Path) -> int:
     """Dependency preparation in the parent's interpreter; its failure is a follow-up (A6)."""
+    from hermes_cli.managed_release import require_unmanaged_update
+    require_unmanaged_update(Path(request["source"]), 'bootstrap_completion')
     try:
         return _prepare(request, request_path, result_path)
     except KeyboardInterrupt:

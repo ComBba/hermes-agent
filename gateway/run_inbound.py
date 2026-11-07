@@ -1163,6 +1163,10 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
         if not _handled:
             _handled, _result, command = await self._hm_dispatch_quick_and_plugin_commands(event, source, command)
         if not _handled:
+            from gateway.managed_inquiry_bridge import managed_command_selected
+            if managed_command_selected(self, event, source):
+                event.allow_gateway_control = False
+                return await self._admit_command_turn(event, source, _quick_key, stop_epoch)
             # Skill-slash resolution is disk-bound (cold skill scan, skill file loads, the
             # unavailable-skill rglob over every skills dir) and uncached on a first hit; on a
             # large install it held the loop past the liveness watchdog (#111091). The executor

@@ -383,10 +383,13 @@ class GatewayRuntimeAPI:
         descriptor = getattr(self.runner, 'session_runtime_descriptor', None)
         if scope['type'] not in {'http', 'websocket'} or descriptor is None:
             return await self.app(scope, receive, send)
+        def owner_unready():
+            return (descriptor['state'] != 'ready' or self.runner._draining
+                    or getattr(self.runner, '_external_drain_active', False))
         draining_socket = (descriptor['state'] in {'ready', 'draining'}
-            and (self.runner._draining or descriptor['state'] == 'draining')
+            and owner_unready()
             and scope['type'] == 'websocket' and scope['path'] == '/api/ws')
-        if ((descriptor['state'] != 'ready' or self.runner._draining) and not draining_socket
+        if (owner_unready() and not draining_socket
                 and not _restart_wait_read(self.runner, scope)
                 and not _restart_wait_socket_ticket(self.runner, scope)):
             if scope['type'] == 'websocket':
@@ -405,15 +408,15 @@ class GatewayRuntimeAPI:
         original_receive = receive
         allow_draining = False
         admitted_in_wait = False
-        from gateway.drain_control import restart_wait_open
+        from gateway.drain_control import interactive_hold_open
 
         async def receive_admitted():
             message = await original_receive()
             # Only a socket admitted INTO the restart wait (to answer a parked prompt) outlives it. One
             # opened before the wait is cut as before: its client reconnects to the next owner, and a
             # held one (a kanban worker polling its card) would otherwise pin the drain to its cap.
-            if ((descriptor['state'] != 'ready' or self.runner._draining) and not allow_draining
-                    and not (admitted_in_wait and restart_wait_open(self.runner))):
+            if (owner_unready() and not allow_draining
+                    and not (admitted_in_wait and interactive_hold_open(self.runner))):
                 return {'type': 'websocket.disconnect', 'code': 1013}
             return message
 
@@ -434,7 +437,7 @@ class GatewayRuntimeAPI:
                 from hermes_cli.web_server_surface import policy
                 admitted_in_wait = (reason == 'ok' and 'internal' not in ws.query_params
                                     and policy(state).gateway_ticket
-                                    and restart_wait_open(self.runner))
+                                    and interactive_hold_open(self.runner))
                 if not admitted_in_wait:
                     await ws.close(code=1013)
                     return
@@ -462,10 +465,10 @@ class GatewayRuntimeAPI:
         # Decided here, at admission, not at the mint: a restart wait that opened after the client's
         # discovery still refuses the machine poller that asked to stay out of it (a Kanban worker),
         # which would otherwise hold the turn the wait is waiting on.
-        admitted_in_wait = restart_wait_open(self.runner) and not grant.get('refuse_restart_wait')
+        admitted_in_wait = interactive_hold_open(self.runner) and not grant.get('refuse_restart_wait')
         # A restart's after-turn wait still owns its turns: an interactive client attaches to answer
         # a parked approval/clarify (#139041); stop() closes this window.
-        if ((descriptor['state'] != 'ready' or self.runner._draining) and not allow_draining
+        if (owner_unready() and not allow_draining
                 and not admitted_in_wait):
             await ws.close(code=1013)
             return

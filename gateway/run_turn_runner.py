@@ -1308,8 +1308,17 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         from gateway.session_authorities import active_authority
         from gateway.session_worker_construct import session_routing
         pr = session_routing(active_authority(runner), policy) if policy else runner._provider_routing
-        reasoning_config = (policy.current_reasoning_config(runner, ctx.session_key) if policy else
-            runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model))
+        applied_channel_reasoning = None
+        if policy:
+            reasoning_config = policy.current_reasoning_config(runner, ctx.session_key)
+        else:
+            from gateway.channel_reasoning import resolve_turn_reasoning
+            reasoning_config, applied_channel_reasoning = resolve_turn_reasoning(
+                runner, source=ctx.source, session_key=ctx.session_key, model=model, message=ctx.message)
+        if applied_channel_reasoning is not None:
+            logger.info("channel reasoning resolved: platform=%s model=%s effort=%s",
+                        getattr(ctx.source.platform, "value", ctx.source.platform),
+                        model, applied_channel_reasoning.get("effort"))
         from gateway.session_cli_turn import one_turn_reasoning
         reasoning_config = one_turn_reasoning(self, reasoning_config)  # `/model --once --reasoning X`
         runner._service_tier = (policy.current_service_tier(runner, ctx.session_key) if policy else
@@ -1395,6 +1404,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # persistence). compression_deferred (soft lock-contention defer) is distinct from
         # compression_exhausted so the gateway never auto-resets a session a concurrent compressor is
         # about to shrink.
+        from gateway.turn_exit_metadata import validated_api_call_observation
+        observation = ({"api_call_observation": validated_api_call_observation(result["api_call_observation"])}
+                       if "api_call_observation" in result else {})
         common = {
             "messages": result.get("messages", []), "api_calls": result.get("api_calls", 0),
             "failed": result.get("failed", False), "failure_reason": result.get("failure_reason"),
@@ -1415,6 +1427,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             # stored receipt cuts there instead of re-guessing from text (multimodal or rewritten input + a nudge).
             **({"current_turn_user_idx": result["current_turn_user_idx"]} if "current_turn_user_idx" in result else {}),
             **usage,
+            **observation,
             **({"persisted_turn": persisted_turn} if persisted_turn else {}),
         }
         previewed = result.get("response_previewed", False)

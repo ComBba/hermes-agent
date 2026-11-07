@@ -1661,7 +1661,12 @@ def _prepare_target_delivery(
 
     origin = _resolve_origin(job) or {}
     origin_thread = origin.get("thread_id")
-    if origin_thread and not thread_id:
+    target_is_origin_parent = (
+        str(origin.get("platform") or "").lower() == str(platform_name).lower()
+        and str(origin.get("chat_id") or "") == str(chat_id)
+        and str(origin_thread) != str(chat_id)
+    )
+    if origin_thread and not thread_id and target_is_origin_parent:
         logger.warning(
             "Job '%s': origin has thread_id=%s but delivery target lost it (deliver=%s, target=%s)",
             job["id"], origin_thread, job.get("deliver", "local"), target)

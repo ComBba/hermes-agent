@@ -242,7 +242,7 @@ class SessionAuthority:
         """``queue_only``: the caller only COMMITS a queued row (never claims or runs it). A restart's
         after-turn wait accepts those (#139041): the row is durable FIFO input the next owner runs
         exactly once, while this owner's claim path stays refused."""
-        if self.retiring:
+        if self.retiring or getattr(self.runner, '_external_drain_active', False):
             raise RuntimeStoreError('runtime_draining')
         if self.runner._draining:
             from gateway.drain_control import restart_wait_open
@@ -1172,7 +1172,8 @@ class SessionAuthority:
     def _drain_stopping(self, ref, live):
         """A drain about to wait (storage retry, classic slot) exits instead when the runtime drains,
         the profile retires or the live entry was replaced; committed rows stay queued."""
-        if self.runner._draining or self.retiring or self.sessions.get(ref.session_id) is not live:
+        if (self.runner._draining or getattr(self.runner, '_external_drain_active', False)
+                or self.retiring or self.sessions.get(ref.session_id) is not live):
             self._pause(ref, 'runtime_draining')
             return True
         return False

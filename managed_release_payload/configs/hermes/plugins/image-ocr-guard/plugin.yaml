@@ -1,0 +1,7 @@
+name: image-ocr-guard
+version: "1.0.1"
+description: Block effectful tools and frame the final Discord reply when an image carries an independent local OCR check
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - transform_llm_output

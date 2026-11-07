@@ -66,7 +66,10 @@ def _adapter_event(event, **changes):
     """An adapter's event at the envelope boundary: an absent media list (``None``) is no media.
     Any other non-list still reaches ``_validate_native`` and refuses."""
     changes.update({name: [] for name in _MEDIA_FIELDS if getattr(event, name) is None})
-    return _drop_remote_media(replace(event, **changes) if changes else event)
+    frozen = _drop_remote_media(replace(event, **changes) if changes else event)
+    if hasattr(event, '_managed_platform_observation'):
+        frozen._managed_platform_observation = event._managed_platform_observation
+    return frozen
 
 
 def _drop_remote_media(event):
@@ -269,6 +272,13 @@ def _snapshot_native(runner, event, provenance, fresh_roles=False, encoded_sourc
             envelope['event']['media_filenames'] = list(event.media_filenames)
     # Keep the private dispatch key so previously committed text-only rows recover
     # under the same authority; optional media/context fields extend that envelope.
+    from gateway.managed_ingress_provenance import snapshot_observation
+    try:
+        platform_observation = snapshot_observation(event, provenance, envelope.get('media', []))
+    except ValueError as exc:
+        raise RuntimeStoreError('invalid_params', field='platform_ingress_v1') from exc
+    if platform_observation is not None:
+        envelope['platform_ingress_v1'] = platform_observation
     payload = {'text': event.text, 'native_text_v1': envelope}
     # Only an exact persisted legacy retry retains its old fingerprint. New
     # ordinary admissions must bind homes too, including execution after restart.
@@ -323,6 +333,13 @@ def restore_native(payload, runner=None):
         from gateway.session_automation import automation_display_metadata, automation_notification_metadata
         event.metadata.update(automation_notification_metadata(envelope['automation']))
         event.metadata.update(automation_display_metadata(envelope['automation']))
+    from gateway.managed_ingress_provenance import restore_observation
+    try:
+        observation = restore_observation(event, envelope)
+    except ValueError as exc:
+        raise RuntimeStoreError('invalid_params', field='platform_ingress_v1') from exc
+    if observation is not None:
+        event._managed_platform_observation = observation
     return event
 
 
