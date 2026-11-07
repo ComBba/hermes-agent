@@ -33,7 +33,9 @@ def test_unmanaged_source_and_loaded_contract_identity(tmp_path, monkeypatch):
         policy.require_unmanaged_update(tmp_path, 'marker_deleted')
 
 
-@pytest.mark.parametrize('kind',['fifo','directory','symlink','oversize'])
+@pytest.mark.parametrize('kind',[
+    pytest.param('fifo',marks=pytest.mark.platforms('posix')),
+    'directory','symlink','oversize'])
 def test_nonregular_or_oversize_activation_is_denied_without_read(tmp_path,monkeypatch,kind):
     (tmp_path/'hermes_cli').mkdir()
     (tmp_path/'hermes_cli/managed_release.py').write_text('public contract')
