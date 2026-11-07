@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import gateway.run as gateway_run
-import gateway.run_turn as run_turn
+from gateway import run_turn
 from gateway.turn_exit_metadata import (
     GATEWAY_STALE_GENERATION,
     GATEWAY_UNHANDLED_EXCEPTION,
@@ -76,11 +76,10 @@ def test_interrupt_without_marker_or_reason_stays_unclassified():
     assert turn_exit_reason({"interrupted": True}) == "gateway_interrupt_unclassified"
 
 
-def test_reason_is_one_bounded_printable_line():
+def test_unknown_reason_is_not_exported_as_provider_text():
     meta = agent_end_metadata({"turn_exit_reason": "a\nb\x07c " + "x" * 500})
-    assert "\n" not in meta["turn_exit_reason"] and "\x07" not in meta["turn_exit_reason"]
-    assert meta["turn_exit_reason"].startswith("a bc")
-    assert len(meta["turn_exit_reason"]) == REASON_MAX_CHARS
+    assert meta["turn_exit_reason"] == "unknown"
+    assert len(meta["turn_exit_reason"]) <= REASON_MAX_CHARS
 
 
 class _Unstringable:
@@ -107,7 +106,8 @@ def test_malformed_reason_fails_safe():
 
 def test_stale_normal_finish_says_why_it_was_dropped():
     meta = agent_end_metadata({"turn_exit_reason": "text_response(finish_reason=stop)"}, stale=True)
-    assert meta == {"turn_exit_reason": GATEWAY_STALE_GENERATION, "api_call_count": 0, "stale": True}
+    assert meta == {"turn_exit_reason": GATEWAY_STALE_GENERATION, "api_call_count": 0,
+                    "api_call_count_kind": "legacy_iteration", "stale": True}
 
 
 def test_stale_abnormal_reason_is_preserved():

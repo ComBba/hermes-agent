@@ -217,24 +217,16 @@ class GatewayConfigLoadersMixin:
         value = " ".join(token for token in tokens if token != "--global")
         return value.strip().lower(), "--global" in tokens
 
-    def _resolve_turn_reasoning_config(
-        self, *, source: Optional[SessionSource], session_key: Optional[str] = None,
-        model: str = "", message: Any = "",
-    ) -> tuple[dict | None, dict | None]:
-        """See ``gateway.channel_reasoning.resolve_turn_reasoning``."""
-        from gateway.channel_reasoning import resolve_turn_reasoning
-        return resolve_turn_reasoning(self, source=source, session_key=session_key, model=model, message=message)
-
     def _resolve_session_reasoning_config(
         self, *, source: Optional[SessionSource] = None, session_key: Optional[str] = None,
-        model: str = "", channel_reasoning_config: Optional[dict] = None,
+        model: str = "", channel_reasoning_config: Optional[dict[str, str | bool]] = None,
     ) -> dict | None:
         """Session ``/reasoning --session`` > local session policy > channel/thread policy >
         per-model ``agent.reasoning_overrides`` > global.
 
         ``model`` must be the session's *effective* model (session ``/model`` override included);
         empty uses ``model.default``. ``channel_reasoning_config`` is the already-resolved
-        ``channel_reasoning_policies`` entry for this turn (see ``_resolve_turn_reasoning_config``).
+        ``channel_reasoning_policies`` entry for this turn (see ``resolve_turn_reasoning``).
         """
         resolved_session_key = self._resolve_session_key_or_none(source, session_key)
         if resolved_session_key:

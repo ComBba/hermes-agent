@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from agent.observed_client_invocations import record_client_invocation
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,13 @@ def _chat_completion_capturing_headers(agent, client, api_kwargs: dict):
     # `is True`: a Mock agent's invented attribute is not a window plan.
     state = getattr(agent, "_credits_state", None)
     if getattr(agent, "provider", "") != "nous" or getattr(state, "is_usage_window", False) is not True:
+        record_client_invocation()
         return client.chat.completions.create(**api_kwargs)
     raw_api = getattr(getattr(getattr(client, "chat", None), "completions", None), "with_raw_response", None)
     if raw_api is None:
+        record_client_invocation()
         return client.chat.completions.create(**api_kwargs)
+    record_client_invocation()
     raw = raw_api.create(**api_kwargs)
     from agent.credits_tracker import response_is_usage_window
     if not response_is_usage_window(raw):

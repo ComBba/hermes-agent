@@ -232,13 +232,12 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                 "session_id": session_entry.session_id,
                 "message": message_text[:500],
             }
-            await self.hooks.emit("agent:start", hook_ctx)
-
             # Capture the launch session id so post-run compression publication is identity-guarded
             # (a /new may move session_entry.session_id while the old run is still unwinding).
             from gateway.run_heartbeat_acceptance import heartbeat_owner_is_current
             if not heartbeat_owner_is_current(self, event, session_key):
                 return
+            await self.hooks.emit("agent:start", hook_ctx)
             _run_start_session_id = session_entry.session_id
             _turn_started_monotonic = time.monotonic()
             # Admission/typing is not execution. All routing, authorization and
@@ -289,9 +288,12 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                 # A superseded run still reports its end before the output is dropped.
                 from gateway.turn_exit_metadata import agent_end_metadata
                 agent_end_emitted = True
-                await self.hooks.emit("agent:end", {
-                    **hook_ctx, "response": "", **agent_end_metadata(agent_result, stale=True),
-                })
+                try:
+                    await self.hooks.emit("agent:end", {
+                        **hook_ctx, "response": "", **agent_end_metadata(agent_result, stale=True),
+                    })
+                except Exception:
+                    logger.debug("agent:end stale emit failed", exc_info=True)
                 self._hmwa_discard_stale_result(source, _quick_key, run_generation)
                 return None
 

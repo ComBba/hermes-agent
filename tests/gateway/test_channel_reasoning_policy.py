@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.channel_reasoning import resolve_channel_reasoning_config
+from gateway.channel_reasoning import resolve_channel_reasoning_config, resolve_turn_reasoning
 
 
 DEV = "1528074929583427687"
@@ -96,7 +96,6 @@ def test_reservation_effort_only_ladder(config):
 def test_reservation_never_uses_ultra_and_never_returns_model(config):
     result = resolve(config, RESERVATION, "여러 분석을 병렬로 진행해줘")
     assert result == {"enabled": True, "effort": "high"}
-    assert "model" not in result
 
 
 def test_non_discord_and_unbound_channels_do_not_override(config):
@@ -222,7 +221,7 @@ def _turn_runner(session_override=None):
         )
     )
     fake._resolve_turn_reasoning_config = (
-        lambda **kwargs: GatewayRunner._resolve_turn_reasoning_config(
+        lambda **kwargs: resolve_turn_reasoning(
             fake, **kwargs
         )
     )

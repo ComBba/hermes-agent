@@ -1316,9 +1316,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             reasoning_config, applied_channel_reasoning = resolve_turn_reasoning(
                 runner, source=ctx.source, session_key=ctx.session_key, model=model, message=ctx.message)
         if applied_channel_reasoning is not None:
-            logger.info("channel reasoning resolved: platform=%s chat=%s thread=%s model=%s effort=%s",
+            logger.info("channel reasoning resolved: platform=%s model=%s effort=%s",
                         getattr(ctx.source.platform, "value", ctx.source.platform),
-                        getattr(ctx.source, "chat_id", None), getattr(ctx.source, "thread_id", None),
                         model, applied_channel_reasoning.get("effort"))
         from gateway.session_cli_turn import one_turn_reasoning
         reasoning_config = one_turn_reasoning(self, reasoning_config)  # `/model --once --reasoning X`

@@ -1,0 +1,4 @@
+name: turn-exit-monitor
+description: Record turns that ended abnormally (iteration limit, interruption, guardrail halt) as a local artifact for the 비서실장 dispatcher to route.
+events:
+  - agent:end

@@ -36,7 +36,7 @@ def _normalize(value: Any) -> str:
 def _terms(value: Any) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         return ()
-    return tuple(term for raw in value if (term := _normalize(raw).strip()))
+    return tuple(term for raw in value if isinstance(raw, str) and (term := _normalize(raw).strip()))
 
 
 def _contains_any(text: str, raw_terms: Any) -> bool:
@@ -54,7 +54,7 @@ def _policy_for_ids(policies: Mapping[str, Any], *ids: Any) -> Optional[Mapping[
     return None
 
 
-def _parsed_effort(effort: Any) -> Optional[dict]:
+def _parsed_effort(effort: Any) -> Optional[dict[str, str | bool]]:
     normalized = _normalize(effort).strip()
     if normalized not in _ALLOWED_EFFORTS:
         return None
@@ -69,7 +69,7 @@ def resolve_channel_reasoning_config(
     thread_id: Any = None,
     parent_id: Any = None,
     message: Any = "",
-) -> Optional[dict]:
+) -> Optional[dict[str, str | bool]]:
     """Return a model-agnostic reasoning override for a bound Discord turn.
 
     Resolution is deterministic and config-only. A thread may inherit its
@@ -128,7 +128,7 @@ def resolve_turn_reasoning(
     session_key: Optional[str] = None,
     model: str = "",
     message: Any = "",
-) -> tuple[Optional[dict], Optional[dict]]:
+) -> tuple[Optional[dict[str, str | bool]], Optional[dict[str, str | bool]]]:
     """A turn's reasoning config, and the channel policy it applied.
 
     Returns ``(reasoning_config, applied_channel_config)``. The policy is

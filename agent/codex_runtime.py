@@ -757,9 +757,11 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         raise _checkpoint_blocked("codex_app_server owns the authoritative thread and compacts it "
                                   "without a truthful pre-compaction transcript boundary")
     _ensure_codex_session(agent, messages)
+    api_calls = 0
     try:
         _start_codex_thread(agent)
         wire_model = _codex_wire_model(agent, getattr(agent, "_codex_session_model_provider", None))
+        api_calls = 1
         turn = agent._codex_session.run_turn(
             user_input=user_message,
             model=wire_model, reasoning_effort=_codex_turn_effort(agent, wire_model),
@@ -769,7 +771,7 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         _close_codex_session(agent)
         _failed_interrupt = _consume_user_interrupt(agent)
         return _turn_result(
-            _failed_interrupt, messages, api_calls=0, completed=False, error=str(exc),
+            _failed_interrupt, messages, api_calls=api_calls, completed=False, error=str(exc),
             final_response=f"Codex app-server turn failed: {exc}. Fall back to default runtime with `/codex-runtime auto`.",
             turn_exit_reason=("interrupted_by_user" if _failed_interrupt[0]
                               else "local_processing_error(codex_app_server)"),
@@ -814,6 +816,7 @@ def _turn_result(interrupt: tuple[bool, Any], messages: list[dict[str, Any]], *,
     user_interrupted, interrupt_message = interrupt
     return {
         "final_response": final_response, "messages": messages, "api_calls": api_calls,
+        "api_call_observation": {"kind": "codex_turn_attempt", "count": api_calls},
         "completed": completed, "partial": not completed, "interrupted": user_interrupted,
         **({"interrupt_message": interrupt_message} if interrupt_message else {}),
         "error": error, **extra,
