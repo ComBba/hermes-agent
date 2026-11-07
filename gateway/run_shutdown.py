@@ -732,6 +732,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         )
         self._update_runtime_status(self._serving_state())
 
+        task = asyncio.create_task(self._resume_external_hold_recovery())
+        self._retain_background_task(task)
+
     async def _drain_control_watcher(self, interval: float = 1.0) -> None:
         """Poll ``.drain_request.json`` at 1s: present -> enter drain, absent -> exit; a stale epoch = absent."""
         from gateway.drain_control import drain_requested

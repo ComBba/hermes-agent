@@ -212,6 +212,10 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         if resolved is None:
             return
         source, session_entry, session_key = resolved
+        from gateway.managed_inquiry_bridge import handle_turn
+        managed_reply = await handle_turn(self, event, source, session_entry, session_key, run_generation)
+        if managed_reply is not None:
+            return managed_reply
         prepared, _session_env_tokens = await self._hmwa_prepare_turn(
             event, source, session_entry, session_key, _quick_key, run_generation,
         )

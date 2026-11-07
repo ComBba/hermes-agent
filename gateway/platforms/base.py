@@ -4151,9 +4151,12 @@ class BasePlatformAdapter(ABC):
         """Ledger the final response BEFORE the send so a crash before platform ACK redelivers on
         next boot; best-effort, skips slash-command and ephemeral replies. Returns the obligation id
         or None."""
-        if is_ephemeral_response or str(event.text or "").lstrip().startswith(
-            ("/", self.typed_command_prefix or "!")):
+        if is_ephemeral_response:
             return None
+        if str(event.text or "").lstrip().startswith(("/", self.typed_command_prefix or "!")):
+            from gateway.managed_inquiry_bridge import verified_managed_completion
+            if not verified_managed_completion(event, text_content):
+                return None
         try:
             from gateway.delivery_ledger import (
                 compute_obligation_id, ledger_enabled, mark_attempting, record_obligation)
@@ -4167,12 +4170,15 @@ class BasePlatformAdapter(ABC):
                 _ledger_id = getattr(event, "message_id", "")
             obligation_id = compute_obligation_id(
                 session_key, str(_ledger_id or ""), text_content)
+            from gateway.managed_inquiry_bridge import managed_completion_key
+            completion_key = managed_completion_key(event, text_content)
             await asyncio.to_thread(
                 record_obligation, obligation_id=obligation_id, session_key=session_key,
                 platform=str(getattr(source.platform, "value", source.platform)),
                 chat_id=source.chat_id, thread_id=getattr(source, "thread_id", None),
                 content=text_content,
-                adapter_profile=getattr(delivery_adapter, "_owner_profile", None))
+                adapter_profile=getattr(delivery_adapter, "_owner_profile", None),
+                managed_completion_key=completion_key)
             await asyncio.to_thread(mark_attempting, obligation_id)
             return obligation_id
         except Exception:
@@ -4301,6 +4307,9 @@ class BasePlatformAdapter(ABC):
         stop_reply_clock(delivery_adapter, event.source.chat_id, result)
         if obligation_id is not None:
             await self._finalize_delivery_obligation(obligation_id, result, event, delivery_adapter)
+        if result.success is True:
+            from gateway.managed_inquiry_bridge import record_successful_delivery
+            await asyncio.to_thread(record_successful_delivery, event, text_content, result)
         return result, delivery_adapter
 
     async def _release_turn_marker(self, event: MessageEvent) -> None:

@@ -122,6 +122,8 @@ async def _hand_over_turn_marker(authority, admission_id, event):
     no-waiter reply keeps it until ``deliver_settled``; any other turn releases it here."""
     adopter = _marker_adopters(authority).get(admission_id)
     if adopter is not None:
+        from gateway.managed_inquiry_bridge import handoff_managed_completion
+        handoff_managed_completion(authority, admission_id, event, adopter)
         _move_marker(event, adopter)
         return
     if admission_id in authority.pending_deliveries:
@@ -297,6 +299,8 @@ async def execute_admission(authority, ref, row):
     authority.native_waiters.discard(row['admission_id'])
     if 'native_text_v1' in row['payload']:
         event = restore_native(row['payload'], authority.runner)
+        from gateway.managed_ingress_provenance import AdmissionOwner, bind_admission
+        bind_admission(event, row, AdmissionOwner(authority.profile_id, ref.session_id, authority.epoch))
     else:
         from gateway.session_ingress_media import restore_attachments
         event = MessageEvent(text=row['payload']['text'], source=live.source,
