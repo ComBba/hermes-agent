@@ -1404,6 +1404,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # persistence). compression_deferred (soft lock-contention defer) is distinct from
         # compression_exhausted so the gateway never auto-resets a session a concurrent compressor is
         # about to shrink.
+        from gateway.turn_exit_metadata import validated_api_call_observation
+        observation = ({"api_call_observation": validated_api_call_observation(result["api_call_observation"])}
+                       if "api_call_observation" in result else {})
         common = {
             "messages": result.get("messages", []), "api_calls": result.get("api_calls", 0),
             "failed": result.get("failed", False), "failure_reason": result.get("failure_reason"),
@@ -1424,6 +1427,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             # stored receipt cuts there instead of re-guessing from text (multimodal or rewritten input + a nudge).
             **({"current_turn_user_idx": result["current_turn_user_idx"]} if "current_turn_user_idx" in result else {}),
             **usage,
+            **observation,
             **({"persisted_turn": persisted_turn} if persisted_turn else {}),
         }
         previewed = result.get("response_previewed", False)

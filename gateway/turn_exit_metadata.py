@@ -8,7 +8,7 @@ output is observed but must not cause delivery or an actionable monitor alert.
 from __future__ import annotations
 
 import re
-from typing import Any, Final
+from typing import Any, Final, Literal, TypedDict
 
 REASON_MAX_CHARS = 200
 GATEWAY_UNHANDLED_EXCEPTION = "gateway_unhandled_exception"
@@ -115,6 +115,27 @@ def turn_exit_reason(agent_result: Any) -> str:
     return "gateway_interrupt_unclassified"
 
 
+class ApiCallObservation(TypedDict):
+    kind: Literal["main_chat_client_invocation", "codex_turn_attempt"]
+    count: int
+
+
+def validated_api_call_observation(value: Any) -> ApiCallObservation | None:
+    if (type(value) is not dict or len(value) != 2
+            or any(type(key) is not str for key in value) or set(value) != {"kind", "count"}):
+        return None
+    kind, count = value["kind"], value["count"]
+    if type(count) is not int or not 0 <= count <= 1_000_000:
+        return None
+    if type(kind) is not str:
+        return None
+    if kind == "main_chat_client_invocation":
+        return {"kind": "main_chat_client_invocation", "count": count}
+    if kind == "codex_turn_attempt":
+        return {"kind": "codex_turn_attempt", "count": count}
+    return None
+
+
 def agent_end_metadata(agent_result: Any, *, stale: bool = False) -> dict[str, Any]:
     """Bounded, fail-safe ``agent:end`` termination metadata."""
     count = agent_result.get("api_calls") if isinstance(agent_result, dict) else None
@@ -123,13 +144,10 @@ def agent_end_metadata(agent_result: Any, *, stale: bool = False) -> dict[str, A
     api_call_count = min(max(0, count), 1_000_000) if type(count) is int else 0
     kind = "legacy_iteration"
     if isinstance(agent_result, dict) and "api_call_observation" in agent_result:
-        observation = agent_result["api_call_observation"]
-        if (isinstance(observation, dict) and set(observation) == {"kind", "count"}
-                and isinstance(observation.get("kind"), str)
-                and observation.get("kind") in {"main_chat_client_invocation", "codex_turn_attempt"}
-                and type(observation.get("count")) is int):
+        observation = validated_api_call_observation(agent_result["api_call_observation"])
+        if observation is not None:
             kind = observation["kind"]
-            api_call_count = min(max(0, observation["count"]), 1_000_000)
+            api_call_count = observation["count"]
         else:
             kind, api_call_count = "unavailable", 0
     reason = turn_exit_reason(agent_result)
