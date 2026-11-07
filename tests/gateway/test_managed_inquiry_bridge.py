@@ -437,6 +437,101 @@ async def test_captionless_image_links_different_inquiry_channel_by_real_source_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('send_success',[True,False])
+async def test_busy_managed_completion_keeps_verified_delivery_and_retry(owner,external_io,send_success):
+    from gateway import delivery_ledger
+    from gateway.managed_ingress_provenance import AdmissionOwner,bind_admission,execution_admission,verified_ingress
+    from gateway.managed_inquiry.task_models import BindingRole,InquiryRequest,TaskScope
+    from gateway.managed_inquiry.task_state import PendingStore
+    from gateway.session_contract import SessionRef
+    from gateway.session_envelope import restore_native
+    from hermes_state_runtime import claim_session_input
+    from tests.waiting import async_wait_until
+    runner,adapter,authority = owner
+    configure_binding(authority)
+    event = MessageEvent('상태 확인',source=adapter.build_source(chat_id='42',chat_type='dm',user_id='42'),
+                         message_id='busy-text',timestamp=datetime.now(UTC))
+    event._managed_platform_observation = PlatformObservation(True,'busy-text','42',())
+    external_io.send_success = send_success
+    route = adapter._source_session_key(event.source)
+    with native_callback(runner,event,get_hermes_home()):
+        assert await runner._queue_command_turn(route,event,event,adapter)
+    def admitted():
+        with authority.db._read_ctx() as connection:
+            return connection.execute('SELECT * FROM session_admissions WHERE request_id=?',('busy-text',)).fetchone()
+    row = await async_wait_until(admitted,what='busy managed completion in native FIFO')
+    await authority._drain(SessionRef(authority.profile_id,row['target_session_id']))
+    await asyncio.wait_for(asyncio.gather(*tuple(adapter._background_tasks)),3)
+    with authority.db._read_ctx() as connection:
+        terminal = connection.execute('SELECT value FROM state_meta WHERE key=?',
+            (RESULT_PREFIX+row['admission_id'],)).fetchone()
+        obligation = connection.execute('SELECT * FROM delivery_obligations WHERE chat_id=?',('42',)).fetchone()
+    result = load_result(terminal['value'])['result']
+    assert result['managed_inquiry_v1']['store_verified'] is True
+    assert obligation is not None and obligation['managed_completion_key']
+    if not send_success:
+        external_io.send_success = True
+        claimed = delivery_ledger.sweep_failed_for_runtime('discord',now=obligation['updated_at']+3600)
+        assert len(claimed)==1
+        assert await runner._redeliver_claimed_obligations(claimed)==1
+    with sqlite3.connect(get_hermes_home()/'managed-inquiry/state.sqlite') as connection:
+        assert connection.execute('SELECT count(*) FROM delivery_refs').fetchone()[0]==1
+    scope = TaskScope(**json.loads(obligation['managed_completion_key'])['scope'])
+    followup = MessageEvent('후속 확인',source=adapter.build_source(chat_id='42',chat_type='dm',user_id='42'),
+        message_id='busy-followup',timestamp=datetime.now(UTC),reply_to_message_id='ack-1')
+    followup._managed_platform_observation = PlatformObservation(True,'busy-followup','42',(),'ack-1')
+    with native_callback(runner,followup,get_hermes_home()):
+        receipt = await authority.admit_native(followup)
+    claimed = claim_session_input(authority.db,epoch=authority.epoch,session_id=receipt.ref.session_id)
+    assert isinstance(claimed,dict)
+    restored = restore_native(claimed['payload'],runner)
+    bind_admission(restored,claimed,AdmissionOwner(authority.profile_id,receipt.ref.session_id,authority.epoch))
+    restored.__dict__['_claimed_owner'] = (receipt.ref.session_id,claimed['generation'])
+    request = InquiryRequest(scope,BindingRole.INQUIRY,restored.text,'busy-followup',
+        execution_admission(restored,session_id=receipt.ref.session_id),
+        verified_ingress(restored,session_id=receipt.ref.session_id).provenance,reply_to_message_id='ack-1')
+    reference = PendingStore(get_hermes_home()/'managed-inquiry/state.sqlite').lookup_reply(request)
+    assert reference is not None and reference.admission_id==row['admission_id']
+    runner._hmwa_prepare_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tamper',['dict','forged_owner','text','source','control','command','owner','foreign_scope',
+    'prepared','store','target_execution','target_owner','duplicate'])
+async def test_busy_delivery_rejects_unverified_or_changed_completion(owner,monkeypatch,tamper):
+    from gateway.managed_inquiry_bridge import transfer_managed_delivery
+    await run_native_inquiry(owner,monkeypatch)
+    completed = owner[1]._native_test_events[-1]
+    cap = completed._managed_completion_capability
+    delivery = replace(completed,source=replace(completed.source))
+    text = cap.prepared.text
+    match tamper:
+        case 'dict': completed._managed_completion_capability = {}
+        case 'forged_owner': completed._managed_completion_capability = replace(cap,execution={})
+        case 'text': text += 'changed'
+        case 'source': delivery.source = replace(delivery.source,user_id='43')
+        case 'control': delivery.allow_gateway_control = not completed.allow_gateway_control
+        case 'command': monkeypatch.setattr(delivery,'get_command',lambda:'foreign')
+        case 'owner': completed._claimed_owner = ('foreign',cap.execution.admission_generation)
+        case 'foreign_scope':
+            completed._managed_completion_capability = replace(cap,request=replace(cap.request,
+                scope=replace(cap.request.scope,profile_id='foreign')))
+        case 'prepared': completed._managed_completion_capability = replace(cap,prepared=replace(cap.prepared,text='changed'))
+        case 'store': completed._managed_completion_capability = replace(cap,store={})
+        case 'target_execution': delivery._managed_execution_admission = cap.execution
+        case 'target_owner': delivery.__dict__['_claimed_owner'] = ('foreign',1)
+        case 'duplicate':
+            assert transfer_managed_delivery(completed,delivery,text) is True
+    assert transfer_managed_delivery(completed,delivery,text) is False
+    if tamper != 'duplicate':
+        assert getattr(delivery,'_managed_completion_capability',None) is None
+        if tamper != 'target_execution':
+            assert getattr(delivery,'_managed_execution_admission',None) is None
+        if tamper != 'target_owner':
+            assert getattr(delivery,'_claimed_owner',None) is None
+
+
+@pytest.mark.asyncio
 async def test_managed_slash_uses_actual_adapter_and_existing_native_fifo(owner,monkeypatch,external_io):
     runner,adapter,authority,_,_,_,_ = await run_native_inquiry(owner,monkeypatch)
     event = MessageEvent('/inquiry status',source=adapter.build_source(chat_id='42',chat_type='dm',user_id='42'),

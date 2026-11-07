@@ -518,6 +518,8 @@ async def dispatch_shared_busy(adapter, event, session_key, *, durable=False):
         event._turn_marker_handoff = getattr(adapter, 'gateway_runner', None) is not None
         try:
             response = await adapter._message_handler(event)
+            from gateway.managed_inquiry_bridge import transfer_managed_delivery
+            transfer_managed_delivery(event, delivery_event, response)
             # The ledgered send releases the marker off the event it sends.
             _move_marker(event, delivery_event)
             delivery_event._turn_marker_handoff = event._turn_marker_handoff

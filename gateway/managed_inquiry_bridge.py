@@ -5,10 +5,12 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import time
 from typing import Any
 
 from gateway.managed_ingress_provenance import ExecutionAdmission, execution_admission, verified_ingress
+from gateway.platforms.event import MessageEvent
 
 INQUIRY_TIMEOUT_SECONDS = 90.0
 
@@ -98,6 +100,39 @@ def handoff_managed_completion(authority,admission_id: str,executed,waiter) -> b
         return verified_managed_completion(waiter,text)
     except Exception:
         return False
+
+
+def transfer_managed_delivery(completed: MessageEvent, delivery: MessageEvent, text: str) -> bool:
+    """Adopt a verified native waiter's completion on its unchanged busy delivery copy."""
+    from gateway.managed_inquiry.task_models import InquiryRequest, PreparedCompletion
+    from gateway.managed_inquiry.task_state import PendingStore
+    cap = getattr(completed, '_managed_completion_capability', None)
+    if (not isinstance(cap, _CompletionCapability)
+            or not isinstance(cap.execution, ExecutionAdmission)
+            or not isinstance(cap.prepared, PreparedCompletion)
+            or not isinstance(cap.request, InquiryRequest) or not isinstance(cap.store, PendingStore)):
+        return False
+    if (not verified_managed_completion(completed, text) or cap.prepared.text != text
+            or cap.request.execution != cap.execution
+            or cap.request.scope.profile_id != cap.execution.profile_id
+            or cap.request.scope.session_id != cap.execution.session_id
+            or cap.prepared.completion_id != cap.completion_id
+            or cap.prepared.receipt_sha256 != cap.receipt_sha256
+            or _event_digest(delivery) != cap.event_sha256
+            or completed.allow_gateway_control != delivery.allow_gateway_control
+            or completed.get_command() != delivery.get_command()
+            or any(getattr(delivery, name, None) is not None for name in (
+                '_managed_completion_capability', '_managed_execution_admission', '_claimed_owner'))):
+        return False
+    try:
+        if not cap.store.verify(cap.prepared, cap.request):
+            return False
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+    delivery._managed_execution_admission = cap.execution
+    delivery.__dict__['_claimed_owner'] = (cap.execution.session_id, cap.execution.admission_generation)
+    delivery.__dict__['_managed_completion_capability'] = cap
+    return True
 
 
 def record_successful_delivery(event, text: str, result) -> bool:
